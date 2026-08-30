@@ -1,6 +1,6 @@
 # Vision Service
 
-Manual Intel RealSense D405 measurement for coins, rings, bars, and chains using aligned depth and color frames.
+Manual Intel RealSense D405 measurement for coins, bangles, rings, bars, and chains using aligned depth and color frames.
 
 ## Requirements
 
@@ -26,11 +26,11 @@ The live camera window also includes a clickable `MENU` button in its upper-righ
 
 Press `C` to start colour calibration. Click nine clean background locations spread across the image. Each click samples an 11 x 11 pixel patch; after the ninth point, a robust CIE Lab background profile is saved to `vision_config.json` for the selected object. Press `C` again before completing nine points to cancel.
 
-Press `A` to draw and save an area of interest (AOI) for the selected object. Drag the rectangle and press `Enter` or `Space` to accept it. The main live window then displays only that cropped region while preserving full-frame coordinates for depth and colour sampling. Press `X` to reset all four object AOIs to the default full camera frame.
+Press `A` to draw and save an area of interest (AOI) for the selected object. Drag the rectangle and press `Enter` or `Space` to accept it. The main live window then displays only that cropped region while preserving full-frame coordinates for depth and colour sampling. Press `X` to reset all object AOIs to the default full camera frame.
 
-After colour calibration, press `D` to run detection once and lock the resulting mask and outline. Detection is not recalculated on every frame. Press `R` to clear the locked detection and measurements. The mask is cleaned with morphological filtering and the main contour is isolated. Coin and Ring modes require a reasonably circular contour and display a fitted enclosing circle. Bar mode requires a rectangular contour and displays a rotated fitted rectangle, supporting bars, plates, and square samples at different angles. Press `B` to toggle between the isolated-object and raw camera views without rerunning detection.
+After colour calibration, press `D` to run detection once and lock the resulting mask and outline. Detection is not recalculated on every frame. Press `R` to clear the locked detection and measurements. The mask is cleaned with morphological filtering and the main contour is isolated. Coin mode requires a reasonably circular contour and displays a fitted enclosing circle. Bar mode requires a rectangular contour and displays a rotated fitted rectangle, supporting bars, plates, and square samples at different angles. Press `B` to toggle between the isolated-object and raw camera views without rerunning detection.
 
-Ring mode uses two boundary passes with constrained ellipse fitting: it fits the outer contour, then finds and fits the largest elliptical hole inside it. Lighter mask cleanup preserves small or thin rings. Results include both major/minor axes, equivalent outer and inner diameters (the geometric mean of each ellipse's axes), and annular top area from the two fitted ellipses.
+Bangle mode keeps the stricter two-boundary detector: it fits the outer contour, then finds and fits the largest elliptical hole inside it. Ring mode uses a smaller-object detector with looser ellipse checks and a fallback inner-opening estimate for cases where the ring hole is weak or partially broken in the mask. Both modes report major/minor axes, equivalent outer and inner diameters (the geometric mean of each ellipse's axes), and annular top area from the two fitted ellipses.
 
 Press `S` after detection or a manual two-point measurement to save a result. The first save asks for the CSV destination and stores that path in `vision_config.json`. Every subsequent save asks only for the item name and appends one new row to the same CSV. Press `O` to select a different results file. Each row contains the timestamp, item name, object type, diameter, projected surface area, estimated camera depth, and AOI coordinates. A manual two-point diameter takes priority over the fitted-circle estimate. Bar results also include rotated-rectangle width, length, top surface area, and estimated thickness. Thickness is calculated from the median background depth minus the median object depth inside the AOI.
 

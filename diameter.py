@@ -10,7 +10,7 @@ import pyrealsense2 as rs
 
 WINDOW_NAME = "D405 Vision Measurement"
 MENU_NAME = "Select Measurement Type"
-OBJECT_OPTIONS = ["Coin", "Ring", "Bar", "Chain"]
+OBJECT_OPTIONS = ["Coin", "Bangle", "Ring", "Bar", "Chain"]
 CALIBRATION_FILE = Path(__file__).with_name("vision_config.json")
 CALIBRATION_POINT_COUNT = 9
 SAMPLE_RADIUS = 5
@@ -174,14 +174,14 @@ def add_calibration_point(x, y):
 
 def draw_menu():
     """Show the object selector without starting the camera."""
-    menu = np.full((420, 640, 3), (32, 35, 42), dtype=np.uint8)
-    cv2.putText(menu, "Select an object", (170, 70), cv2.FONT_HERSHEY_SIMPLEX,
+    menu = np.full((520, 720, 3), (32, 35, 42), dtype=np.uint8)
+    cv2.putText(menu, "Select an object", (210, 70), cv2.FONT_HERSHEY_SIMPLEX,
                 1.1, (255, 255, 255), 2, cv2.LINE_AA)
-    cv2.putText(menu, "The camera starts after your selection", (130, 105),
+    cv2.putText(menu, "The camera starts after your selection", (170, 105),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (185, 190, 200), 1, cv2.LINE_AA)
 
     button_width, button_height = 220, 85
-    positions = [(75, 145), (345, 145), (75, 265), (345, 265)]
+    positions = [(75, 145), (345, 145), (75, 265), (345, 265), (210, 385)]
     buttons = []
     for label, (x, y) in zip(OBJECT_OPTIONS, positions):
         cv2.rectangle(menu, (x, y), (x + button_width, y + button_height),
@@ -310,6 +310,90 @@ def draw_calibration(display):
                     cv2.LINE_AA)
 
 
+def is_ring_like_object():
+    return selected_object in ("Bangle", "Ring")
+
+
+def find_annulus_hole(object_mask, contour, outer_ellipse, area, center_x,
+                      center_y, radius, strict):
+    outer_fill = np.zeros_like(object_mask)
+    cv2.drawContours(outer_fill, [contour], -1, 255, thickness=-1)
+    hole_mask = cv2.bitwise_and(outer_fill, cv2.bitwise_not(object_mask))
+    if not strict:
+        hole_mask = cv2.morphologyEx(
+            hole_mask, cv2.MORPH_OPEN,
+            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)))
+    hole_contours, _ = cv2.findContours(
+        hole_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    valid_holes = []
+    minimum_hole_area = max(20.0 if strict else 8.0, area * (0.015 if strict else 0.004))
+    minimum_axis_ratio = 0.25 if strict else 0.12
+    minimum_fit = 0.55 if strict else 0.30
+    center_limit = 0.45 if strict else 0.70
+    nesting_limit = 0.98 if strict else 1.05
+    for hole_contour in hole_contours:
+        hole_area = cv2.contourArea(hole_contour)
+        if hole_area < minimum_hole_area or len(hole_contour) < 5:
+            continue
+        hole_ellipse = cv2.fitEllipse(hole_contour)
+        hole_axis_a, hole_axis_b = hole_ellipse[1]
+        hole_major = max(hole_axis_a, hole_axis_b)
+        hole_minor = min(hole_axis_a, hole_axis_b)
+        if hole_major <= 1 or hole_minor / hole_major < minimum_axis_ratio:
+            continue
+        hole_ellipse_area = np.pi * hole_axis_a * hole_axis_b * 0.25
+        hole_fit = min(hole_area, hole_ellipse_area) / max(
+            hole_area, hole_ellipse_area)
+        if hole_fit >= minimum_fit:
+            valid_holes.append((hole_contour, hole_area, hole_ellipse, hole_fit))
+
+    if not valid_holes:
+        return None, None
+
+    inner_contour, _, inner_ellipse, _ = max(
+        valid_holes, key=lambda candidate: candidate[1] * candidate[3])
+    (inner_x, inner_y), inner_radius = cv2.minEnclosingCircle(inner_contour)
+    center_offset = np.hypot(inner_x - center_x, inner_y - center_y)
+    outer_axes = sorted(outer_ellipse[1])
+    inner_axes = sorted(inner_ellipse[1])
+    axes_are_nested = (
+        inner_axes[0] < outer_axes[0] * nesting_limit and
+        inner_axes[1] < outer_axes[1] * nesting_limit)
+    if inner_radius <= 1 or center_offset > radius * center_limit or not axes_are_nested:
+        return None, None
+    return {
+        "center": (int(round(inner_x)), int(round(inner_y))),
+        "radius": int(round(inner_radius)),
+    }, inner_ellipse
+
+
+def estimate_small_ring_hole(object_mask, contour, outer_ellipse):
+    """Fallback for small rings whose inner background contour is incomplete."""
+    outer_fill = np.zeros_like(object_mask)
+    cv2.drawContours(outer_fill, [contour], -1, 255, thickness=-1)
+    band_only = cv2.bitwise_and(object_mask, outer_fill)
+    if cv2.countNonZero(band_only) < 10:
+        return None, None
+
+    distance = cv2.distanceTransform(band_only, cv2.DIST_L2, 5)
+    band_width = float(distance.max()) * 2.0
+    outer_axis_a, outer_axis_b = outer_ellipse[1]
+    inner_axis_a = max(2.0, outer_axis_a - 2.0 * band_width)
+    inner_axis_b = max(2.0, outer_axis_b - 2.0 * band_width)
+    if inner_axis_a >= outer_axis_a * 0.96 or inner_axis_b >= outer_axis_b * 0.96:
+        return None, None
+    if inner_axis_a <= outer_axis_a * 0.10 or inner_axis_b <= outer_axis_b * 0.10:
+        return None, None
+
+    inner_ellipse = (outer_ellipse[0], (inner_axis_a, inner_axis_b), outer_ellipse[2])
+    inner_circle = {
+        "center": (int(round(outer_ellipse[0][0])), int(round(outer_ellipse[0][1]))),
+        "radius": int(round(max(inner_axis_a, inner_axis_b) * 0.5)),
+    }
+    return inner_circle, inner_ellipse
+
+
 def segment_object(cropped_bgr):
     """Remove the calibrated background and locate the main object contour."""
     if not active_color_calibration:
@@ -324,21 +408,23 @@ def segment_object(cropped_bgr):
     background = np.all(np.abs(lab_image - center) <= tolerance, axis=2)
     object_mask = (~background).astype(np.uint8) * 255
 
-    kernel_size = 3 if selected_object == "Ring" else 5
+    kernel_size = 3 if is_ring_like_object() else 5
     kernel = cv2.getStructuringElement(
         cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
-    if selected_object == "Ring":
+    if is_ring_like_object():
         # Closing fills small breaks without eroding a thin ring band away.
         object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
+        if selected_object == "Ring":
+            object_mask = cv2.dilate(object_mask, kernel, iterations=1)
     else:
         object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel)
         object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(
         object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    area_fraction = 0.0002 if selected_object == "Ring" else 0.002
+    area_fraction = 0.00012 if selected_object == "Ring" else 0.0002 if selected_object == "Bangle" else 0.002
     minimum_area = max(
-        30.0 if selected_object == "Ring" else 100.0,
+        18.0 if selected_object == "Ring" else 30.0 if selected_object == "Bangle" else 100.0,
         cropped_bgr.shape[0] * cropped_bgr.shape[1] * area_fraction)
     candidates = []
     for contour in contours:
@@ -361,8 +447,10 @@ def segment_object(cropped_bgr):
             return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
         contour, area, circularity = max(
             circular, key=lambda candidate: candidate[1] * candidate[2])
-    elif selected_object == "Ring":
+    elif is_ring_like_object():
         elliptical = []
+        minimum_axis_ratio = 0.18 if selected_object == "Ring" else 0.25
+        minimum_fit = 0.35 if selected_object == "Ring" else 0.60
         for candidate in candidates:
             candidate_contour, candidate_area, candidate_circularity = candidate
             if len(candidate_contour) < 5:
@@ -371,11 +459,11 @@ def segment_object(cropped_bgr):
             axis_a, axis_b = candidate_ellipse[1]
             major_axis = max(axis_a, axis_b)
             minor_axis = min(axis_a, axis_b)
-            if major_axis <= 1 or minor_axis / major_axis < 0.25:
+            if major_axis <= 1 or minor_axis / major_axis < minimum_axis_ratio:
                 continue
             ellipse_area = np.pi * axis_a * axis_b * 0.25
             area_fit = min(candidate_area, ellipse_area) / max(candidate_area, ellipse_area)
-            if area_fit >= 0.60:
+            if area_fit >= minimum_fit:
                 elliptical.append((
                     candidate_contour, candidate_area, candidate_circularity,
                     candidate_ellipse, area_fit))
@@ -420,45 +508,13 @@ def segment_object(cropped_bgr):
     (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
     inner_circle = None
     inner_ellipse = None
-    if selected_object == "Ring":
-        outer_fill = np.zeros_like(object_mask)
-        cv2.drawContours(outer_fill, [contour], -1, 255, thickness=-1)
-        hole_mask = cv2.bitwise_and(outer_fill, cv2.bitwise_not(object_mask))
-        hole_contours, _ = cv2.findContours(
-            hole_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        valid_holes = []
-        minimum_hole_area = max(20.0, area * 0.015)
-        for hole_contour in hole_contours:
-            hole_area = cv2.contourArea(hole_contour)
-            if hole_area < minimum_hole_area or len(hole_contour) < 5:
-                continue
-            hole_ellipse = cv2.fitEllipse(hole_contour)
-            hole_axis_a, hole_axis_b = hole_ellipse[1]
-            hole_major = max(hole_axis_a, hole_axis_b)
-            hole_minor = min(hole_axis_a, hole_axis_b)
-            if hole_major <= 1 or hole_minor / hole_major < 0.25:
-                continue
-            hole_ellipse_area = np.pi * hole_axis_a * hole_axis_b * 0.25
-            hole_fit = min(hole_area, hole_ellipse_area) / max(
-                hole_area, hole_ellipse_area)
-            if hole_fit >= 0.55:
-                valid_holes.append((hole_contour, hole_area, hole_ellipse, hole_fit))
-        if valid_holes:
-            inner_contour, _, inner_ellipse, _ = max(
-                valid_holes, key=lambda candidate: candidate[1] * candidate[3])
-            (inner_x, inner_y), inner_radius = cv2.minEnclosingCircle(inner_contour)
-            center_offset = np.hypot(inner_x - center_x, inner_y - center_y)
-            outer_axes = sorted(outer_ellipse[1])
-            inner_axes = sorted(inner_ellipse[1])
-            axes_are_nested = (
-                inner_axes[0] < outer_axes[0] * 0.98 and
-                inner_axes[1] < outer_axes[1] * 0.98)
-            if (inner_radius > 1 and center_offset <= radius * 0.45 and
-                    axes_are_nested):
-                inner_circle = {
-                    "center": (int(round(inner_x)), int(round(inner_y))),
-                    "radius": int(round(inner_radius)),
-                }
+    if is_ring_like_object():
+        inner_circle, inner_ellipse = find_annulus_hole(
+            object_mask, contour, outer_ellipse, area, center_x, center_y,
+            radius, strict=(selected_object == "Bangle"))
+        if inner_circle is None and selected_object == "Ring":
+            inner_circle, inner_ellipse = estimate_small_ring_hole(
+                object_mask, contour, outer_ellipse)
         if inner_circle is None:
             return isolated, None
     detection = {
@@ -485,7 +541,7 @@ def draw_detection(display, detection):
     if selected_object == "Coin" and detection["radius"] > 1:
         cv2.circle(display, detection["center"], detection["radius"],
                    (0, 255, 0), 2)
-    if selected_object == "Ring" and detection["outer_ellipse"] is not None:
+    if is_ring_like_object() and detection["outer_ellipse"] is not None:
         cv2.ellipse(display, detection["outer_ellipse"], (0, 255, 0), 2)
         cv2.ellipse(display, detection["inner_ellipse"], (0, 200, 255), 2)
     if selected_object == "Bar" and detection["rectangle"] is not None:
@@ -537,7 +593,7 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
         ) * 0.5 * 1000.0
         metrics["diameter_mm"] = 2.0 * detection["radius"] * scale_mm_per_pixel
         metrics["outer_diameter_mm"] = metrics["diameter_mm"]
-    if selected_object == "Ring" and detection["inner_ellipse"] is not None:
+    if is_ring_like_object() and detection["inner_ellipse"] is not None:
         scale_mm_per_pixel = (
             depth_m / intrinsics.fx + depth_m / intrinsics.fy
         ) * 0.5 * 1000.0
