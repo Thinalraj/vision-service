@@ -30,6 +30,8 @@ current_aoi = (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
 active_color_calibration = None
 background_removal_enabled = True
 latest_result = {}
+menu_requested = False
+menu_button_rect = None
 
 
 def load_config():
@@ -220,9 +222,15 @@ def select_object():
 
 
 def mouse_callback(event, x, y, flags, param):
-    global clicked_points, latest_result
+    global clicked_points, latest_result, menu_requested
     if event != cv2.EVENT_LBUTTONDOWN or depth_frame_global is None:
         return
+
+    if menu_button_rect is not None:
+        left, top, right, bottom = menu_button_rect
+        if left <= x <= right and top <= y <= bottom:
+            menu_requested = True
+            return
 
     # The live window is cropped, so translate clicks back to the aligned
     # camera frame before sampling depth or colour.
@@ -403,6 +411,27 @@ def draw_detection(display, detection):
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
 
+def draw_menu_button(display):
+    global menu_button_rect
+    height, width = display.shape[:2]
+    if width < 80 or height < 50:
+        menu_button_rect = None
+        return
+    button_width = min(100, max(60, width - 20))
+    left = max(10, width - button_width - 10)
+    top = 10
+    right = min(width - 1, left + button_width)
+    bottom = min(height - 1, top + 36)
+    menu_button_rect = (left, top, right, bottom)
+    cv2.rectangle(display, (left, top), (right, bottom), (55, 75, 95), -1)
+    cv2.rectangle(display, (left, top), (right, bottom), (255, 255, 255), 1)
+    text_size = cv2.getTextSize("MENU", cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)[0]
+    text_x = left + max(2, (right - left - text_size[0]) // 2)
+    text_y = top + max(text_size[1] + 2, (bottom - top + text_size[1]) // 2)
+    cv2.putText(display, "MENU", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+
 def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale):
     """Estimate depth, projected area, and circle diameter from a locked mask."""
     left, top, right, bottom = current_aoi
@@ -549,12 +578,13 @@ def save_result_dialog():
 def run_camera():
     global depth_frame_global, intrinsics_global, current_color_image
     global calibration_mode, current_aoi, active_color_calibration
-    global background_removal_enabled, latest_result
+    global background_removal_enabled, latest_result, menu_requested
     current_aoi = load_aoi()
     active_color_calibration = load_config().get(
         "color_calibrations", {}).get(selected_object)
     background_removal_enabled = True
     latest_result = {}
+    menu_requested = False
     locked_detection = None
     pipeline = rs.pipeline()
     config = rs.config()
@@ -623,9 +653,12 @@ def run_camera():
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
+            draw_menu_button(display)
             cv2.imshow(WINDOW_NAME, display)
 
             key = cv2.waitKey(1) & 0xFF
+            if menu_requested:
+                return True
             if key == 27:
                 return False
             if key in (ord("r"), ord("R")):
@@ -693,6 +726,7 @@ def run_camera():
         intrinsics_global = None
         current_color_image = None
         calibration_mode = False
+        menu_requested = False
         pipeline.stop()
         cv2.destroyWindow(WINDOW_NAME)
 
