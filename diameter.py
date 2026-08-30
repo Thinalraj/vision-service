@@ -386,6 +386,36 @@ def segment_object(cropped_bgr):
     selected_mask = cv2.bitwise_and(selected_mask, object_mask)
     isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=selected_mask)
     (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
+    inner_circle = None
+    if selected_object == "Ring":
+        outer_fill = np.zeros_like(object_mask)
+        cv2.drawContours(outer_fill, [contour], -1, 255, thickness=-1)
+        hole_mask = cv2.bitwise_and(outer_fill, cv2.bitwise_not(object_mask))
+        hole_contours, _ = cv2.findContours(
+            hole_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        valid_holes = []
+        minimum_hole_area = max(50.0, area * 0.03)
+        for hole_contour in hole_contours:
+            hole_area = cv2.contourArea(hole_contour)
+            hole_perimeter = cv2.arcLength(hole_contour, True)
+            if hole_area < minimum_hole_area or hole_perimeter <= 0:
+                continue
+            hole_circularity = (
+                4.0 * np.pi * hole_area / (hole_perimeter * hole_perimeter))
+            if hole_circularity >= 0.50:
+                valid_holes.append((hole_contour, hole_area, hole_circularity))
+        if valid_holes:
+            inner_contour, _, _ = max(
+                valid_holes, key=lambda candidate: candidate[1] * candidate[2])
+            (inner_x, inner_y), inner_radius = cv2.minEnclosingCircle(inner_contour)
+            center_offset = np.hypot(inner_x - center_x, inner_y - center_y)
+            if inner_radius > 1 and center_offset <= radius * 0.35:
+                inner_circle = {
+                    "center": (int(round(inner_x)), int(round(inner_y))),
+                    "radius": int(round(inner_radius)),
+                }
+        if inner_circle is None:
+            return isolated, None
     detection = {
         "contour": contour,
         "center": (int(round(center_x)), int(round(center_y))),
@@ -394,6 +424,7 @@ def segment_object(cropped_bgr):
         "rectangle": None,
         "rectangularity": rectangularity,
         "mask": selected_mask,
+        "inner_circle": inner_circle,
     }
     if rectangle is not None:
         detection["rectangle"] = np.int32(cv2.boxPoints(rectangle))
@@ -407,6 +438,9 @@ def draw_detection(display, detection):
     if selected_object in ("Coin", "Ring") and detection["radius"] > 1:
         cv2.circle(display, detection["center"], detection["radius"],
                    (0, 255, 0), 2)
+    if selected_object == "Ring" and detection["inner_circle"] is not None:
+        cv2.circle(display, detection["inner_circle"]["center"],
+                   detection["inner_circle"]["radius"], (0, 200, 255), 2)
     if selected_object == "Bar" and detection["rectangle"] is not None:
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
@@ -455,6 +489,15 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
             depth_m / intrinsics.fx + depth_m / intrinsics.fy
         ) * 0.5 * 1000.0
         metrics["diameter_mm"] = 2.0 * detection["radius"] * scale_mm_per_pixel
+        metrics["outer_diameter_mm"] = metrics["diameter_mm"]
+        if selected_object == "Ring" and detection["inner_circle"] is not None:
+            inner_diameter_mm = (
+                2.0 * detection["inner_circle"]["radius"] * scale_mm_per_pixel)
+            metrics["inner_diameter_mm"] = inner_diameter_mm
+            metrics["surface_area_mm2"] = (
+                np.pi * 0.25 *
+                (metrics["outer_diameter_mm"] ** 2 - inner_diameter_mm ** 2)
+            )
     if selected_object == "Bar" and detection["rectangle"] is not None:
         box = detection["rectangle"].astype(np.float32)
         side_lengths_mm = []
@@ -542,6 +585,8 @@ def save_result_dialog():
         "item_name": item_name,
         "object_type": selected_object,
         "diameter_mm": latest_result.get("diameter_mm", ""),
+        "outer_diameter_mm": latest_result.get("outer_diameter_mm", ""),
+        "inner_diameter_mm": latest_result.get("inner_diameter_mm", ""),
         "width_mm": latest_result.get("width_mm", ""),
         "length_mm": latest_result.get("length_mm", ""),
         "surface_area_mm2": latest_result.get("surface_area_mm2", ""),
