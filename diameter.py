@@ -21,6 +21,7 @@ current_color_image = None
 calibration_mode = False
 calibration_points = []
 calibration_samples = []
+current_aoi = (0, 0, 639, 479)
 
 
 def load_config():
@@ -32,6 +33,54 @@ def load_config():
     except (OSError, ValueError) as error:
         print("Could not load {}: {}".format(CALIBRATION_FILE, error))
         return {"version": 1, "color_calibrations": {}}
+
+
+def write_config(config_data):
+    with CALIBRATION_FILE.open("w", encoding="utf-8") as config_file:
+        json.dump(config_data, config_file, indent=2)
+        config_file.write("\n")
+
+
+def load_aoi():
+    saved = load_config().get("areas", {}).get(selected_object)
+    if isinstance(saved, list) and len(saved) == 4:
+        return tuple(int(value) for value in saved)
+    return (0, 0, 639, 479)
+
+
+def save_aoi(aoi):
+    config_data = load_config()
+    config_data.setdefault("areas", {})[selected_object] = list(aoi)
+    write_config(config_data)
+    print("Saved {} AOI: {}".format(selected_object, aoi))
+
+
+def reset_all_aois():
+    config_data = load_config()
+    config_data["areas"] = {}
+    write_config(config_data)
+    print("All AOIs reset to the full 640 x 480 frame.")
+
+
+def point_in_aoi(x, y):
+    left, top, right, bottom = current_aoi
+    return left <= x <= right and top <= y <= bottom
+
+
+def choose_aoi():
+    """Pause the live view while the operator draws a new AOI."""
+    global current_aoi
+    if current_color_image is None:
+        return
+    selector_name = "Set AOI - drag, then press Enter or Space"
+    x, y, width, height = cv2.selectROI(
+        selector_name, current_color_image, showCrosshair=True, fromCenter=False)
+    cv2.destroyWindow(selector_name)
+    if width > 1 and height > 1:
+        current_aoi = (int(x), int(y), int(x + width - 1), int(y + height - 1))
+        save_aoi(current_aoi)
+    else:
+        print("AOI selection cancelled; previous AOI kept.")
 
 
 def save_color_calibration(samples):
@@ -52,9 +101,7 @@ def save_color_calibration(samples):
         "resolution": [int(current_color_image.shape[1]),
                        int(current_color_image.shape[0])],
     }
-    with CALIBRATION_FILE.open("w", encoding="utf-8") as config_file:
-        json.dump(config_data, config_file, indent=2)
-        config_file.write("\n")
+    write_config(config_data)
 
     print("Saved {} background calibration to {}".format(
         selected_object, CALIBRATION_FILE))
@@ -134,6 +181,10 @@ def mouse_callback(event, x, y, flags, param):
     if event != cv2.EVENT_LBUTTONDOWN or depth_frame_global is None:
         return
 
+    if not point_in_aoi(x, y):
+        print("Point is outside the AOI.")
+        return
+
     if calibration_mode and current_color_image is not None:
         add_calibration_point(x, y)
         return
@@ -195,9 +246,15 @@ def draw_calibration(display):
                     cv2.LINE_AA)
 
 
+def draw_aoi(display):
+    left, top, right, bottom = current_aoi
+    cv2.rectangle(display, (left, top), (right, bottom), (0, 255, 0), 2)
+
+
 def run_camera():
     global depth_frame_global, intrinsics_global, current_color_image
-    global calibration_mode
+    global calibration_mode, current_aoi
+    current_aoi = load_aoi()
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
@@ -210,7 +267,8 @@ def run_camera():
     for _ in range(30):
         pipeline.wait_for_frames()
     print("Camera ready.")
-    print("Click two points. C = Colour calibration, R = Reset, M = Menu, ESC = Exit.")
+    print("A = Set AOI, D = Reset all AOIs, C = Colour calibration.")
+    print("Click two points. R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
     cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
@@ -229,6 +287,7 @@ def run_camera():
             # unblended BGR frame to match RealSense Viewer color rendering.
             current_color_image = np.asanyarray(color_frame.get_data()).copy()
             display = current_color_image.copy()
+            draw_aoi(display)
             if calibration_mode:
                 draw_calibration(display)
                 instruction = "CALIBRATE: click background points {}/{}".format(
@@ -241,7 +300,7 @@ def run_camera():
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                         (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
-                        "C = Calibrate   R = Reset   M = Menu   ESC = Exit",
+                        "A = AOI  D = Default  C = Calibrate  R = Reset  M = Menu",
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
@@ -253,6 +312,16 @@ def run_camera():
             if key in (ord("r"), ord("R")):
                 clicked_points.clear()
                 print("Measurement reset.")
+            if key in (ord("a"), ord("A")):
+                calibration_mode = False
+                calibration_points.clear()
+                calibration_samples.clear()
+                choose_aoi()
+                cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
+            if key in (ord("d"), ord("D")):
+                reset_all_aois()
+                current_aoi = (0, 0, 639, 479)
+                clicked_points.clear()
             if key in (ord("c"), ord("C")):
                 calibration_mode = not calibration_mode
                 calibration_points.clear()
