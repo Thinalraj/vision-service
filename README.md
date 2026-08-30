@@ -1,6 +1,6 @@
 # Vision Service
 
-Manual Intel RealSense D405 coin-diameter measurement using aligned depth and color frames.
+Manual Intel RealSense D405 measurement for coins, rings, bars, and chains using aligned depth and color frames.
 
 ## Requirements
 
@@ -20,4 +20,6 @@ Run:
 python diameter.py
 ```
 
-Click two opposite edges of a coin to measure its 3D diameter. Press `R` to reset and `Esc` to exit.
+Choose an object from the opening menu to start the camera, then click two measurement points. Press `R` to reset, `M` to return to the menu, and `Esc` to exit.
+
+The application displays the unblended BGR camera stream so its colors match the RealSense Viewer more closely.
