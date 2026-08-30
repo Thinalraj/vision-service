@@ -559,6 +559,12 @@ def segment_object(cropped_bgr):
         "score": 1.0,
         "inner_detected": inner_circle is not None,
     }
+    if outer_ellipse is not None:
+        detection["outer_diameter_px"] = float(
+            np.sqrt(outer_ellipse[1][0] * outer_ellipse[1][1]))
+    if inner_ellipse is not None:
+        detection["inner_diameter_px"] = float(
+            np.sqrt(inner_ellipse[1][0] * inner_ellipse[1][1]))
     if rectangle is not None:
         detection["rectangle"] = np.int32(cv2.boxPoints(rectangle))
     return isolated, detection
@@ -796,6 +802,7 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
         metrics["outer_major_axis_mm"] = outer_axes_mm[1]
         metrics["outer_eccentricity_ratio"] = (
             outer_axes_mm[0] / outer_axes_mm[1] if outer_axes_mm[1] > 0 else "")
+        metrics["outer_axis_ratio"] = metrics["outer_eccentricity_ratio"]
         metrics["outer_diameter_mm"] = float(np.sqrt(outer_axes_mm[0] * outer_axes_mm[1]))
         metrics["diameter_mm"] = metrics["outer_diameter_mm"]
         metrics["confidence_score"] = detection.get("score", "")
@@ -804,7 +811,12 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
         if "outer_diameter_px" in detection:
             metrics["outer_diameter_px"] = detection["outer_diameter_px"]
         if detection.get("inner_detected"):
-            metrics["inner_diameter_px"] = detection["inner_diameter_px"]
+            inner_diameter_px = detection.get("inner_diameter_px")
+            if inner_diameter_px is None and detection.get("inner_ellipse") is not None:
+                inner_diameter_px = float(np.sqrt(
+                    detection["inner_ellipse"][1][0] *
+                    detection["inner_ellipse"][1][1]))
+            metrics["inner_diameter_px"] = inner_diameter_px
         if detection.get("inner_ellipse") is not None:
             inner_axes_mm = sorted(
                 axis * scale_mm_per_pixel for axis in detection["inner_ellipse"][1])
@@ -812,6 +824,7 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
             metrics["inner_major_axis_mm"] = inner_axes_mm[1]
             metrics["inner_eccentricity_ratio"] = (
                 inner_axes_mm[0] / inner_axes_mm[1] if inner_axes_mm[1] > 0 else "")
+            metrics["inner_axis_ratio"] = metrics["inner_eccentricity_ratio"]
             metrics["inner_diameter_mm"] = float(
                 np.sqrt(inner_axes_mm[0] * inner_axes_mm[1]))
             metrics["surface_area_mm2"] = (
