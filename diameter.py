@@ -11,7 +11,8 @@ import pyrealsense2 as rs
 WINDOW_NAME = "D405 Vision Measurement"
 MENU_NAME = "Select Measurement Type"
 OBJECT_OPTIONS = ["Coin", "Bangle", "Ring", "Bar", "Chain"]
-CALIBRATION_FILE = Path(__file__).with_name("vision_config.json")
+SETTINGS_FILE = Path(__file__).with_name("settings.json")
+LEGACY_CONFIG_FILE = Path(__file__).with_name("vision_config.json")
 CALIBRATION_POINT_COUNT = 9
 SAMPLE_RADIUS = 5
 FRAME_WIDTH = 1280
@@ -42,25 +43,58 @@ display_image_rect = (0, 0, IMAGE_DISPLAY_WIDTH - 1, IMAGE_DISPLAY_HEIGHT - 1)
 last_detection_debug_reason = ""
 
 
+def default_settings():
+    return {
+        "version": 2,
+        "modes": {mode: {} for mode in OBJECT_OPTIONS},
+    }
+
+
+def normalize_settings(settings):
+    normalized = default_settings()
+    if isinstance(settings, dict):
+        normalized.update(settings)
+    modes = normalized.setdefault("modes", {})
+    for mode in OBJECT_OPTIONS:
+        mode_settings = modes.setdefault(mode, {})
+        legacy_aoi = normalized.get("areas", {}).get(mode)
+        if legacy_aoi is not None and "aoi" not in mode_settings:
+            mode_settings["aoi"] = legacy_aoi
+        legacy_calibration = normalized.get("color_calibrations", {}).get(mode)
+        if legacy_calibration is not None and "color_calibration" not in mode_settings:
+            mode_settings["color_calibration"] = legacy_calibration
+    normalized.pop("areas", None)
+    normalized.pop("color_calibrations", None)
+    normalized["version"] = 2
+    return normalized
+
+
 def load_config():
-    if not CALIBRATION_FILE.exists():
-        return {"version": 1, "color_calibrations": {}}
+    config_path = SETTINGS_FILE if SETTINGS_FILE.exists() else LEGACY_CONFIG_FILE
+    if not config_path.exists():
+        return default_settings()
     try:
-        with CALIBRATION_FILE.open("r", encoding="utf-8") as config_file:
-            return json.load(config_file)
+        with config_path.open("r", encoding="utf-8") as config_file:
+            settings = normalize_settings(json.load(config_file))
+            if config_path == LEGACY_CONFIG_FILE and not SETTINGS_FILE.exists():
+                write_config(settings)
+                print("Migrated {} to {}.".format(
+                    LEGACY_CONFIG_FILE, SETTINGS_FILE))
+            return settings
     except (OSError, ValueError) as error:
-        print("Could not load {}: {}".format(CALIBRATION_FILE, error))
-        return {"version": 1, "color_calibrations": {}}
+        print("Could not load {}: {}".format(config_path, error))
+        return default_settings()
 
 
 def write_config(config_data):
-    with CALIBRATION_FILE.open("w", encoding="utf-8") as config_file:
-        json.dump(config_data, config_file, indent=2)
+    with SETTINGS_FILE.open("w", encoding="utf-8") as config_file:
+        json.dump(normalize_settings(config_data), config_file, indent=2)
         config_file.write("\n")
 
 
 def load_aoi():
-    saved = load_config().get("areas", {}).get(selected_object)
+    saved = load_config().get("modes", {}).get(
+        selected_object, {}).get("aoi")
     saved_resolution = [640, 480]
     if isinstance(saved, dict):
         saved_resolution = saved.get("resolution", [FRAME_WIDTH, FRAME_HEIGHT])
@@ -85,7 +119,7 @@ def load_aoi():
 
 def save_aoi(aoi):
     config_data = load_config()
-    config_data.setdefault("areas", {})[selected_object] = {
+    config_data.setdefault("modes", {}).setdefault(selected_object, {})["aoi"] = {
         "coordinates": list(aoi),
         "resolution": [FRAME_WIDTH, FRAME_HEIGHT],
     }
@@ -95,7 +129,8 @@ def save_aoi(aoi):
 
 def reset_all_aois():
     config_data = load_config()
-    config_data["areas"] = {}
+    for mode_settings in config_data.setdefault("modes", {}).values():
+        mode_settings.pop("aoi", None)
     write_config(config_data)
     print("All AOIs reset to the full {} x {} frame.".format(
         FRAME_WIDTH, FRAME_HEIGHT))
@@ -143,8 +178,7 @@ def save_color_calibration(samples):
     spread = np.maximum(median_deviation * 1.4826, 2.0)
 
     config_data = load_config()
-    calibrations = config_data.setdefault("color_calibrations", {})
-    calibrations[selected_object] = {
+    calibration = {
         "color_space": "OpenCV Lab",
         "lab_median": center.round(3).tolist(),
         "lab_spread": spread.round(3).tolist(),
@@ -153,11 +187,13 @@ def save_color_calibration(samples):
         "resolution": [int(current_color_image.shape[1]),
                        int(current_color_image.shape[0])],
     }
-    active_color_calibration = calibrations[selected_object]
+    config_data.setdefault("modes", {}).setdefault(
+        selected_object, {})["color_calibration"] = calibration
+    active_color_calibration = calibration
     write_config(config_data)
 
     print("Saved {} background calibration to {}".format(
-        selected_object, CALIBRATION_FILE))
+        selected_object, SETTINGS_FILE))
     print("Lab median:", center.round(2).tolist())
     print("Lab spread:", spread.round(2).tolist())
 
@@ -925,8 +961,8 @@ def run_camera():
     global background_removal_enabled, latest_result, menu_requested
     global last_detection_debug_reason, pending_action, result_error
     current_aoi = load_aoi()
-    active_color_calibration = load_config().get(
-        "color_calibrations", {}).get(selected_object)
+    active_color_calibration = load_config().get("modes", {}).get(
+        selected_object, {}).get("color_calibration")
     background_removal_enabled = True
     latest_result = {}
     result_error = ""

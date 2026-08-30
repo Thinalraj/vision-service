@@ -4,4 +4,5 @@ __pycache__/
 venv/
 .DS_Store
 vision_config.json
+settings.json
 measurement_results.csv
