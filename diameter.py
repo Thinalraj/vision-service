@@ -17,6 +17,24 @@ SAMPLE_RADIUS = 5
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 FRAME_RATE = 30
+MAX_RING_DIAMETER_CM = 5.0
+RING_DETECTOR_CONFIG = {
+    "max_ring_diameter_cm": MAX_RING_DIAMETER_CM,
+    "green_hsv_lower": (35, 35, 35),
+    "green_hsv_upper": (95, 255, 255),
+    "morph_kernel": 3,
+    "morph_iterations": 1,
+    "min_outer_area_px": 80.0,
+    "max_outer_area_fraction": 0.45,
+    "min_outer_circularity": 0.18,
+    "min_inner_circularity": 0.15,
+    "min_ellipse_axis_ratio": 0.25,
+    "min_inner_outer_diameter_ratio": 0.15,
+    "max_inner_outer_diameter_ratio": 0.85,
+    "max_concentricity_ratio": 0.35,
+    "nominal_depth_mm_for_pixel_limit": 300.0,
+    "max_rejection_logs": 8,
+}
 
 clicked_points = []
 depth_frame_global = None
@@ -32,6 +50,7 @@ background_removal_enabled = True
 latest_result = {}
 menu_requested = False
 menu_button_rect = None
+last_detection_debug_reason = ""
 
 
 def load_config():
@@ -49,6 +68,17 @@ def write_config(config_data):
     with CALIBRATION_FILE.open("w", encoding="utf-8") as config_file:
         json.dump(config_data, config_file, indent=2)
         config_file.write("\n")
+
+
+def load_ring_detector_config():
+    config = dict(RING_DETECTOR_CONFIG)
+    saved = load_config().get("ring_detector", {})
+    for key, value in saved.items():
+        if key in config:
+            config[key] = value
+    config["green_hsv_lower"] = tuple(config["green_hsv_lower"])
+    config["green_hsv_upper"] = tuple(config["green_hsv_upper"])
+    return config
 
 
 def load_aoi():
@@ -394,8 +424,236 @@ def estimate_small_ring_hole(object_mask, contour, outer_ellipse):
     return inner_circle, inner_ellipse
 
 
+def contour_circularity(contour):
+    area = cv2.contourArea(contour)
+    perimeter = cv2.arcLength(contour, True)
+    if perimeter <= 0:
+        return 0.0
+    return float(4.0 * np.pi * area / (perimeter * perimeter))
+
+
+def contour_center(contour):
+    moments = cv2.moments(contour)
+    if abs(moments["m00"]) > 1e-6:
+        return (
+            float(moments["m10"] / moments["m00"]),
+            float(moments["m01"] / moments["m00"]),
+        )
+    (center_x, center_y), _ = cv2.minEnclosingCircle(contour)
+    return float(center_x), float(center_y)
+
+
+def fit_contour_ellipse(contour):
+    if len(contour) < 5:
+        return None, 0.0
+    ellipse = cv2.fitEllipse(contour)
+    axis_a, axis_b = ellipse[1]
+    major_axis = max(axis_a, axis_b)
+    minor_axis = min(axis_a, axis_b)
+    if major_axis <= 0:
+        return ellipse, 0.0
+    return ellipse, float(minor_axis / major_axis)
+
+
+def max_ring_diameter_pixels(cropped_shape, config):
+    nominal_depth_m = (
+        config["nominal_depth_mm_for_pixel_limit"] / 1000.0)
+    max_diameter_m = config["max_ring_diameter_cm"] / 100.0
+    if intrinsics_global is None:
+        return float(max(cropped_shape[:2]))
+    fx_fy = (intrinsics_global.fx + intrinsics_global.fy) * 0.5
+    return float(max_diameter_m * fx_fy / nominal_depth_m)
+
+
+def reject_ring_candidate(rejections, reason):
+    rejections[reason] = rejections.get(reason, 0) + 1
+
+
+def detect_ring_with_green_background(cropped_bgr):
+    config = load_ring_detector_config()
+    hsv_image = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2HSV)
+    green_mask = cv2.inRange(
+        hsv_image,
+        np.array(config["green_hsv_lower"], dtype=np.uint8),
+        np.array(config["green_hsv_upper"], dtype=np.uint8),
+    )
+    object_mask = cv2.bitwise_not(green_mask)
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (config["morph_kernel"], config["morph_kernel"]))
+    object_mask = cv2.morphologyEx(
+        object_mask, cv2.MORPH_OPEN, kernel,
+        iterations=config["morph_iterations"])
+    object_mask = cv2.morphologyEx(
+        object_mask, cv2.MORPH_CLOSE, kernel,
+        iterations=config["morph_iterations"])
+
+    contours, hierarchy = cv2.findContours(
+        object_mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    if hierarchy is None:
+        return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None, (
+            "no contours in non-green mask")
+
+    hierarchy = hierarchy[0]
+    max_diameter_px = max_ring_diameter_pixels(cropped_bgr.shape, config)
+    max_area_px = (
+        cropped_bgr.shape[0] * cropped_bgr.shape[1] *
+        config["max_outer_area_fraction"])
+    candidates = []
+    rejections = {}
+
+    for outer_index, outer_contour in enumerate(contours):
+        child_index = hierarchy[outer_index][2]
+        if child_index < 0:
+            reject_ring_candidate(rejections, "outer has no inner hole")
+            continue
+
+        outer_area = cv2.contourArea(outer_contour)
+        if outer_area < config["min_outer_area_px"]:
+            reject_ring_candidate(rejections, "outer area too small")
+            continue
+        if outer_area > max_area_px:
+            reject_ring_candidate(rejections, "outer area too large")
+            continue
+
+        (outer_center_x, outer_center_y), outer_radius = cv2.minEnclosingCircle(
+            outer_contour)
+        outer_diameter = float(outer_radius * 2.0)
+        if outer_diameter > max_diameter_px:
+            reject_ring_candidate(rejections, "outer diameter above limit")
+            continue
+
+        outer_circularity = contour_circularity(outer_contour)
+        if outer_circularity < config["min_outer_circularity"]:
+            reject_ring_candidate(rejections, "outer circularity too low")
+            continue
+
+        outer_ellipse, outer_axis_ratio = fit_contour_ellipse(outer_contour)
+        if outer_ellipse is None:
+            reject_ring_candidate(rejections, "outer has too few points")
+            continue
+        if outer_axis_ratio < config["min_ellipse_axis_ratio"]:
+            reject_ring_candidate(rejections, "outer ellipse too stretched")
+            continue
+
+        inner_index = child_index
+        while inner_index >= 0:
+            inner_contour = contours[inner_index]
+            inner_area = cv2.contourArea(inner_contour)
+            inner_circularity = contour_circularity(inner_contour)
+            if inner_circularity < config["min_inner_circularity"]:
+                reject_ring_candidate(rejections, "inner circularity too low")
+                inner_index = hierarchy[inner_index][0]
+                continue
+
+            (_, _), inner_radius = cv2.minEnclosingCircle(inner_contour)
+            inner_diameter = float(inner_radius * 2.0)
+            diameter_ratio = inner_diameter / outer_diameter
+            if diameter_ratio < config["min_inner_outer_diameter_ratio"]:
+                reject_ring_candidate(rejections, "inner hole too small")
+                inner_index = hierarchy[inner_index][0]
+                continue
+            if diameter_ratio > config["max_inner_outer_diameter_ratio"]:
+                reject_ring_candidate(rejections, "inner hole too large")
+                inner_index = hierarchy[inner_index][0]
+                continue
+
+            inner_ellipse, inner_axis_ratio = fit_contour_ellipse(inner_contour)
+            if inner_ellipse is None:
+                reject_ring_candidate(rejections, "inner has too few points")
+                inner_index = hierarchy[inner_index][0]
+                continue
+            if inner_axis_ratio < config["min_ellipse_axis_ratio"]:
+                reject_ring_candidate(rejections, "inner ellipse too stretched")
+                inner_index = hierarchy[inner_index][0]
+                continue
+
+            inner_center_x, inner_center_y = contour_center(inner_contour)
+            center_distance = float(np.hypot(
+                inner_center_x - outer_center_x, inner_center_y - outer_center_y))
+            concentricity = center_distance / max(outer_radius, 1.0)
+            if concentricity > config["max_concentricity_ratio"]:
+                reject_ring_candidate(rejections, "inner/outer centers too far")
+                inner_index = hierarchy[inner_index][0]
+                continue
+
+            score = (
+                outer_circularity * 0.25 +
+                inner_circularity * 0.20 +
+                outer_axis_ratio * 0.20 +
+                inner_axis_ratio * 0.15 +
+                (1.0 - min(concentricity / config["max_concentricity_ratio"],
+                           1.0)) * 0.15 +
+                (1.0 - abs(diameter_ratio - 0.50)) * 0.05
+            )
+            candidates.append({
+                "outer_contour": outer_contour,
+                "inner_contour": inner_contour,
+                "outer_ellipse": outer_ellipse,
+                "inner_ellipse": inner_ellipse,
+                "center": (int(round(outer_center_x)), int(round(outer_center_y))),
+                "outer_diameter_px": outer_diameter,
+                "inner_diameter_px": inner_diameter,
+                "outer_circularity": outer_circularity,
+                "inner_circularity": inner_circularity,
+                "score": float(score),
+            })
+            inner_index = hierarchy[inner_index][0]
+
+    isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask)
+    if not candidates:
+        if rejections:
+            top_reasons = sorted(
+                rejections.items(), key=lambda item: item[1], reverse=True)
+            reason = ", ".join(
+                "{} ({})".format(reason, count)
+                for reason, count in top_reasons[:config["max_rejection_logs"]])
+        else:
+            reason = "no ring candidates"
+        print("Ring detector rejected candidates: {}".format(reason))
+        return isolated, None, reason
+
+    best = max(candidates, key=lambda candidate: candidate["score"])
+    selected_mask = np.zeros_like(object_mask)
+    cv2.drawContours(selected_mask, [best["outer_contour"]], -1, 255, -1)
+    cv2.drawContours(selected_mask, [best["inner_contour"]], -1, 0, -1)
+    isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=selected_mask)
+    detection = {
+        "detected": True,
+        "contour": best["outer_contour"],
+        "inner_contour": best["inner_contour"],
+        "center": best["center"],
+        "radius": int(round(best["outer_diameter_px"] * 0.5)),
+        "circularity": best["outer_circularity"],
+        "rectangle": None,
+        "rectangularity": None,
+        "mask": selected_mask,
+        "inner_circle": {
+            "center": tuple(int(round(value)) for value in contour_center(
+                best["inner_contour"])),
+            "radius": int(round(best["inner_diameter_px"] * 0.5)),
+        },
+        "outer_ellipse": best["outer_ellipse"],
+        "inner_ellipse": best["inner_ellipse"],
+        "outer_diameter_px": best["outer_diameter_px"],
+        "inner_diameter_px": best["inner_diameter_px"],
+        "score": best["score"],
+        "debug_reason": "accepted score {:.3f}".format(best["score"]),
+    }
+    print(
+        "Ring candidate accepted: score={:.3f}, outer={:.1f}px, inner={:.1f}px".format(
+            best["score"], best["outer_diameter_px"], best["inner_diameter_px"]))
+    return isolated, detection, detection["debug_reason"]
+
+
 def segment_object(cropped_bgr):
     """Remove the calibrated background and locate the main object contour."""
+    global last_detection_debug_reason
+    if selected_object == "Ring":
+        isolated, detection, debug_reason = detect_ring_with_green_background(
+            cropped_bgr)
+        last_detection_debug_reason = debug_reason
+        return isolated, detection
+
     if not active_color_calibration:
         return cropped_bgr, None
 
@@ -518,6 +776,7 @@ def segment_object(cropped_bgr):
         if inner_circle is None:
             return isolated, None
     detection = {
+        "detected": True,
         "contour": contour,
         "center": (int(round(center_x)), int(round(center_y))),
         "radius": int(round(radius)),
@@ -528,6 +787,7 @@ def segment_object(cropped_bgr):
         "inner_circle": inner_circle,
         "outer_ellipse": outer_ellipse,
         "inner_ellipse": inner_ellipse,
+        "score": 1.0,
     }
     if rectangle is not None:
         detection["rectangle"] = np.int32(cv2.boxPoints(rectangle))
@@ -544,6 +804,19 @@ def draw_detection(display, detection):
     if is_ring_like_object() and detection["outer_ellipse"] is not None:
         cv2.ellipse(display, detection["outer_ellipse"], (0, 255, 0), 2)
         cv2.ellipse(display, detection["inner_ellipse"], (0, 200, 255), 2)
+        if detection.get("inner_contour") is not None:
+            cv2.drawContours(display, [detection["inner_contour"]], -1,
+                             (0, 200, 255), 2)
+        cv2.circle(display, detection["center"], 4, (255, 255, 255), -1)
+        label = "OD {:.1f}px ID {:.1f}px score {:.2f}".format(
+            detection.get("outer_diameter_px", detection["radius"] * 2),
+            detection.get("inner_diameter_px", 0.0),
+            detection.get("score", 0.0))
+        cv2.putText(display, label,
+                    (max(5, detection["center"][0] - 120),
+                     max(20, detection["center"][1] - 15)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2,
+                    cv2.LINE_AA)
     if selected_object == "Bar" and detection["rectangle"] is not None:
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
@@ -567,6 +840,16 @@ def draw_menu_button(display):
     text_y = top + max(text_size[1] + 2, (bottom - top + text_size[1]) // 2)
     cv2.putText(display, "MENU", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX,
                 0.55, (255, 255, 255), 2, cv2.LINE_AA)
+
+
+def draw_debug_status(display):
+    if not last_detection_debug_reason:
+        return
+    height = display.shape[0]
+    text = "Detector: {}".format(last_detection_debug_reason[:95])
+    cv2.putText(display, text, (20, max(90, height - 18)),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
+                cv2.LINE_AA)
 
 
 def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale):
@@ -608,6 +891,11 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
         metrics["outer_diameter_mm"] = float(np.sqrt(outer_axes_mm[0] * outer_axes_mm[1]))
         metrics["inner_diameter_mm"] = float(np.sqrt(inner_axes_mm[0] * inner_axes_mm[1]))
         metrics["diameter_mm"] = metrics["outer_diameter_mm"]
+        metrics["confidence_score"] = detection.get("score", "")
+        if "outer_diameter_px" in detection:
+            metrics["outer_diameter_px"] = detection["outer_diameter_px"]
+        if "inner_diameter_px" in detection:
+            metrics["inner_diameter_px"] = detection["inner_diameter_px"]
         metrics["surface_area_mm2"] = (
             np.pi * 0.25 *
             (outer_axes_mm[0] * outer_axes_mm[1] -
@@ -706,6 +994,9 @@ def save_result_dialog():
         "outer_minor_axis_mm": latest_result.get("outer_minor_axis_mm", ""),
         "inner_major_axis_mm": latest_result.get("inner_major_axis_mm", ""),
         "inner_minor_axis_mm": latest_result.get("inner_minor_axis_mm", ""),
+        "outer_diameter_px": latest_result.get("outer_diameter_px", ""),
+        "inner_diameter_px": latest_result.get("inner_diameter_px", ""),
+        "confidence_score": latest_result.get("confidence_score", ""),
         "width_mm": latest_result.get("width_mm", ""),
         "length_mm": latest_result.get("length_mm", ""),
         "surface_area_mm2": latest_result.get("surface_area_mm2", ""),
@@ -743,12 +1034,14 @@ def run_camera():
     global depth_frame_global, intrinsics_global, current_color_image
     global calibration_mode, current_aoi, active_color_calibration
     global background_removal_enabled, latest_result, menu_requested
+    global last_detection_debug_reason
     current_aoi = load_aoi()
     active_color_calibration = load_config().get(
         "color_calibrations", {}).get(selected_object)
     background_removal_enabled = True
     latest_result = {}
     menu_requested = False
+    last_detection_debug_reason = ""
     locked_detection = None
     pipeline = rs.pipeline()
     config = rs.config()
@@ -802,11 +1095,13 @@ def run_camera():
                 else:
                     display = cropped
                 draw_measurement(display)
-                if not active_color_calibration:
+                if locked_detection is not None:
+                    instruction = "Mode: {} | Detection locked".format(selected_object)
+                elif selected_object == "Ring":
+                    instruction = "Mode: Ring | Press D to detect on green background"
+                elif not active_color_calibration:
                     instruction = "Mode: {} | Press C to calibrate background".format(
                         selected_object)
-                elif locked_detection is not None:
-                    instruction = "Mode: {} | Detection locked".format(selected_object)
                 else:
                     instruction = "Mode: {} | Press D to detect".format(selected_object)
             cv2.putText(display, instruction,
@@ -817,6 +1112,7 @@ def run_camera():
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
+            draw_debug_status(display)
             draw_menu_button(display)
             cv2.imshow(WINDOW_NAME, display)
 
@@ -829,6 +1125,7 @@ def run_camera():
                 clicked_points.clear()
                 locked_detection = None
                 latest_result = {}
+                last_detection_debug_reason = ""
                 print("Measurement and detection reset.")
             if key in (ord("a"), ord("A")):
                 calibration_mode = False
@@ -837,6 +1134,7 @@ def run_camera():
                 calibration_samples.clear()
                 locked_detection = None
                 latest_result = {}
+                last_detection_debug_reason = ""
                 choose_aoi()
                 cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
             if key in (ord("x"), ord("X")):
@@ -845,8 +1143,9 @@ def run_camera():
                 clicked_points.clear()
                 locked_detection = None
                 latest_result = {}
+                last_detection_debug_reason = ""
             if key in (ord("d"), ord("D")):
-                if not active_color_calibration:
+                if selected_object != "Ring" and not active_color_calibration:
                     print("No colour calibration. Press C and sample 9 background points first.")
                 else:
                     _, new_detection = segment_object(cropped)
@@ -873,6 +1172,7 @@ def run_camera():
                 calibration_samples.clear()
                 locked_detection = None
                 latest_result = {}
+                last_detection_debug_reason = ""
                 if calibration_mode:
                     clicked_points.clear()
                     print("Colour calibration started.")
@@ -891,6 +1191,7 @@ def run_camera():
         current_color_image = None
         calibration_mode = False
         menu_requested = False
+        last_detection_debug_reason = ""
         pipeline.stop()
         cv2.destroyWindow(WINDOW_NAME)
 
