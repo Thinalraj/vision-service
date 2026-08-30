@@ -498,15 +498,11 @@ def detect_ring_with_green_background(cropped_bgr):
     max_area_px = (
         cropped_bgr.shape[0] * cropped_bgr.shape[1] *
         config["max_outer_area_fraction"])
-    candidates = []
+    outer_candidates = []
+    full_candidates = []
     rejections = {}
 
     for outer_index, outer_contour in enumerate(contours):
-        child_index = hierarchy[outer_index][2]
-        if child_index < 0:
-            reject_ring_candidate(rejections, "outer has no inner hole")
-            continue
-
         outer_area = cv2.contourArea(outer_contour)
         if outer_area < config["min_outer_area_px"]:
             reject_ring_candidate(rejections, "outer area too small")
@@ -533,6 +529,32 @@ def detect_ring_with_green_background(cropped_bgr):
             continue
         if outer_axis_ratio < config["min_ellipse_axis_ratio"]:
             reject_ring_candidate(rejections, "outer ellipse too stretched")
+            continue
+
+        outer_score = (
+            outer_circularity * 0.35 +
+            outer_axis_ratio * 0.35 +
+            (1.0 - min(outer_diameter / max(max_diameter_px, 1.0), 1.0)) * 0.10 +
+            min(outer_area / max(config["min_outer_area_px"] * 12.0, 1.0), 1.0) * 0.20
+        )
+        outer_candidate = {
+            "outer_contour": outer_contour,
+            "inner_contour": None,
+            "outer_ellipse": outer_ellipse,
+            "inner_ellipse": None,
+            "center": (int(round(outer_center_x)), int(round(outer_center_y))),
+            "outer_diameter_px": outer_diameter,
+            "inner_diameter_px": "",
+            "outer_circularity": outer_circularity,
+            "inner_circularity": "",
+            "score": float(outer_score),
+            "inner_detected": False,
+        }
+        outer_candidates.append(outer_candidate)
+
+        child_index = hierarchy[outer_index][2]
+        if child_index < 0:
+            reject_ring_candidate(rejections, "outer accepted but no inner hole")
             continue
 
         inner_index = child_index
@@ -585,7 +607,7 @@ def detect_ring_with_green_background(cropped_bgr):
                            1.0)) * 0.15 +
                 (1.0 - abs(diameter_ratio - 0.50)) * 0.05
             )
-            candidates.append({
+            full_candidates.append({
                 "outer_contour": outer_contour,
                 "inner_contour": inner_contour,
                 "outer_ellipse": outer_ellipse,
@@ -596,11 +618,12 @@ def detect_ring_with_green_background(cropped_bgr):
                 "outer_circularity": outer_circularity,
                 "inner_circularity": inner_circularity,
                 "score": float(score),
+                "inner_detected": True,
             })
             inner_index = hierarchy[inner_index][0]
 
     isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask)
-    if not candidates:
+    if not outer_candidates:
         if rejections:
             top_reasons = sorted(
                 rejections.items(), key=lambda item: item[1], reverse=True)
@@ -612,10 +635,14 @@ def detect_ring_with_green_background(cropped_bgr):
         print("Ring detector rejected candidates: {}".format(reason))
         return isolated, None, reason
 
-    best = max(candidates, key=lambda candidate: candidate["score"])
+    best = max(
+        full_candidates if full_candidates else outer_candidates,
+        key=lambda candidate: candidate["score"])
     selected_mask = np.zeros_like(object_mask)
     cv2.drawContours(selected_mask, [best["outer_contour"]], -1, 255, -1)
-    cv2.drawContours(selected_mask, [best["inner_contour"]], -1, 0, -1)
+    if best["inner_contour"] is not None:
+        cv2.drawContours(selected_mask, [best["inner_contour"]], -1, 0, -1)
+    selected_mask = cv2.bitwise_and(selected_mask, object_mask)
     isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=selected_mask)
     detection = {
         "detected": True,
@@ -627,21 +654,28 @@ def detect_ring_with_green_background(cropped_bgr):
         "rectangle": None,
         "rectangularity": None,
         "mask": selected_mask,
-        "inner_circle": {
-            "center": tuple(int(round(value)) for value in contour_center(
-                best["inner_contour"])),
-            "radius": int(round(best["inner_diameter_px"] * 0.5)),
-        },
+        "inner_circle": None,
         "outer_ellipse": best["outer_ellipse"],
         "inner_ellipse": best["inner_ellipse"],
         "outer_diameter_px": best["outer_diameter_px"],
         "inner_diameter_px": best["inner_diameter_px"],
         "score": best["score"],
-        "debug_reason": "accepted score {:.3f}".format(best["score"]),
+        "inner_detected": best["inner_detected"],
+        "debug_reason": "accepted {} score {:.3f}".format(
+            "outer+inner" if best["inner_detected"] else "outer-only",
+            best["score"]),
     }
+    if best["inner_contour"] is not None:
+        detection["inner_circle"] = {
+            "center": tuple(int(round(value)) for value in contour_center(
+                best["inner_contour"])),
+            "radius": int(round(best["inner_diameter_px"] * 0.5)),
+        }
     print(
-        "Ring candidate accepted: score={:.3f}, outer={:.1f}px, inner={:.1f}px".format(
-            best["score"], best["outer_diameter_px"], best["inner_diameter_px"]))
+        "Ring candidate accepted: score={:.3f}, outer={:.1f}px, inner={}".format(
+            best["score"], best["outer_diameter_px"],
+            "{:.1f}px".format(best["inner_diameter_px"])
+            if best["inner_detected"] else "not detected"))
     return isolated, detection, detection["debug_reason"]
 
 
@@ -803,14 +837,18 @@ def draw_detection(display, detection):
                    (0, 255, 0), 2)
     if is_ring_like_object() and detection["outer_ellipse"] is not None:
         cv2.ellipse(display, detection["outer_ellipse"], (0, 255, 0), 2)
-        cv2.ellipse(display, detection["inner_ellipse"], (0, 200, 255), 2)
+        if detection.get("inner_ellipse") is not None:
+            cv2.ellipse(display, detection["inner_ellipse"], (0, 200, 255), 2)
         if detection.get("inner_contour") is not None:
             cv2.drawContours(display, [detection["inner_contour"]], -1,
                              (0, 200, 255), 2)
         cv2.circle(display, detection["center"], 4, (255, 255, 255), -1)
-        label = "OD {:.1f}px ID {:.1f}px score {:.2f}".format(
+        inner_label = (
+            "{:.1f}px".format(detection["inner_diameter_px"])
+            if detection.get("inner_detected") else "not found")
+        label = "OD {:.1f}px ID {} score {:.2f}".format(
             detection.get("outer_diameter_px", detection["radius"] * 2),
-            detection.get("inner_diameter_px", 0.0),
+            inner_label,
             detection.get("score", 0.0))
         cv2.putText(display, label,
                     (max(5, detection["center"][0] - 120),
@@ -843,6 +881,7 @@ def draw_ring_metrics_panel(display):
             latest_result.get("outer_major_axis_mm"), " mm")),
         ("Outer minor", format_metric(
             latest_result.get("outer_minor_axis_mm"), " mm")),
+        ("Inner status", latest_result.get("inner_status", "-")),
         ("Inner major", format_metric(
             latest_result.get("inner_major_axis_mm"), " mm")),
         ("Inner minor", format_metric(
@@ -948,31 +987,37 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
         ) * 0.5 * 1000.0
         metrics["diameter_mm"] = 2.0 * detection["radius"] * scale_mm_per_pixel
         metrics["outer_diameter_mm"] = metrics["diameter_mm"]
-    if is_ring_like_object() and detection["inner_ellipse"] is not None:
+    if is_ring_like_object() and detection["outer_ellipse"] is not None:
         scale_mm_per_pixel = (
             depth_m / intrinsics.fx + depth_m / intrinsics.fy
         ) * 0.5 * 1000.0
         outer_axes_mm = sorted(
             axis * scale_mm_per_pixel for axis in detection["outer_ellipse"][1])
-        inner_axes_mm = sorted(
-            axis * scale_mm_per_pixel for axis in detection["inner_ellipse"][1])
         metrics["outer_minor_axis_mm"] = outer_axes_mm[0]
         metrics["outer_major_axis_mm"] = outer_axes_mm[1]
-        metrics["inner_minor_axis_mm"] = inner_axes_mm[0]
-        metrics["inner_major_axis_mm"] = inner_axes_mm[1]
         metrics["outer_diameter_mm"] = float(np.sqrt(outer_axes_mm[0] * outer_axes_mm[1]))
-        metrics["inner_diameter_mm"] = float(np.sqrt(inner_axes_mm[0] * inner_axes_mm[1]))
         metrics["diameter_mm"] = metrics["outer_diameter_mm"]
         metrics["confidence_score"] = detection.get("score", "")
+        metrics["inner_status"] = (
+            "detected" if detection.get("inner_detected") else "not detected")
         if "outer_diameter_px" in detection:
             metrics["outer_diameter_px"] = detection["outer_diameter_px"]
-        if "inner_diameter_px" in detection:
+        if detection.get("inner_detected"):
             metrics["inner_diameter_px"] = detection["inner_diameter_px"]
-        metrics["surface_area_mm2"] = (
-            np.pi * 0.25 *
-            (outer_axes_mm[0] * outer_axes_mm[1] -
-             inner_axes_mm[0] * inner_axes_mm[1])
-        )
+        if detection.get("inner_ellipse") is not None:
+            inner_axes_mm = sorted(
+                axis * scale_mm_per_pixel for axis in detection["inner_ellipse"][1])
+            metrics["inner_minor_axis_mm"] = inner_axes_mm[0]
+            metrics["inner_major_axis_mm"] = inner_axes_mm[1]
+            metrics["inner_diameter_mm"] = float(
+                np.sqrt(inner_axes_mm[0] * inner_axes_mm[1]))
+            metrics["surface_area_mm2"] = (
+                np.pi * 0.25 *
+                (outer_axes_mm[0] * outer_axes_mm[1] -
+                 inner_axes_mm[0] * inner_axes_mm[1])
+            )
+        else:
+            metrics["surface_area_mm2"] = ""
     if selected_object == "Bar" and detection["rectangle"] is not None:
         box = detection["rectangle"].astype(np.float32)
         side_lengths_mm = []
@@ -1066,6 +1111,7 @@ def save_result_dialog():
         "outer_minor_axis_mm": latest_result.get("outer_minor_axis_mm", ""),
         "inner_major_axis_mm": latest_result.get("inner_major_axis_mm", ""),
         "inner_minor_axis_mm": latest_result.get("inner_minor_axis_mm", ""),
+        "inner_status": latest_result.get("inner_status", ""),
         "outer_diameter_px": latest_result.get("outer_diameter_px", ""),
         "inner_diameter_px": latest_result.get("inner_diameter_px", ""),
         "confidence_score": latest_result.get("confidence_score", ""),
