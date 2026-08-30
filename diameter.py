@@ -22,6 +22,8 @@ calibration_mode = False
 calibration_points = []
 calibration_samples = []
 current_aoi = (0, 0, 639, 479)
+active_color_calibration = None
+background_removal_enabled = True
 
 
 def load_config():
@@ -85,6 +87,7 @@ def choose_aoi():
 
 def save_color_calibration(samples):
     """Save a robust Lab background model for the selected object mode."""
+    global active_color_calibration
     pixels = np.concatenate(samples, axis=0).astype(np.float32)
     center = np.median(pixels, axis=0)
     median_deviation = np.median(np.abs(pixels - center), axis=0)
@@ -101,6 +104,7 @@ def save_color_calibration(samples):
         "resolution": [int(current_color_image.shape[1]),
                        int(current_color_image.shape[0])],
     }
+    active_color_calibration = calibrations[selected_object]
     write_config(config_data)
 
     print("Saved {} background calibration to {}".format(
@@ -258,10 +262,79 @@ def draw_calibration(display):
                     cv2.LINE_AA)
 
 
+def segment_object(cropped_bgr):
+    """Remove the calibrated background and locate the main object contour."""
+    if not active_color_calibration:
+        return cropped_bgr, None
+
+    lab_image = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2LAB).astype(np.float32)
+    center = np.array(active_color_calibration["lab_median"], dtype=np.float32)
+    spread = np.array(active_color_calibration["lab_spread"], dtype=np.float32)
+    # A minimum tolerance prevents sensor noise from defeating a very uniform
+    # calibration. Three robust spreads cover normal background variation.
+    tolerance = np.maximum(spread * 3.0, np.array([12.0, 10.0, 10.0]))
+    background = np.all(np.abs(lab_image - center) <= tolerance, axis=2)
+    object_mask = (~background).astype(np.uint8) * 255
+
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel)
+    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
+
+    contours, _ = cv2.findContours(
+        object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    minimum_area = max(100.0, cropped_bgr.shape[0] * cropped_bgr.shape[1] * 0.002)
+    candidates = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        perimeter = cv2.arcLength(contour, True)
+        if area < minimum_area or perimeter <= 0:
+            continue
+        circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+        candidates.append((contour, area, circularity))
+
+    if not candidates:
+        return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
+
+    if selected_object in ("Coin", "Ring"):
+        circular = [candidate for candidate in candidates if candidate[2] >= 0.55]
+        if not circular:
+            return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
+        contour, area, circularity = max(
+            circular, key=lambda candidate: candidate[1] * candidate[2])
+    else:
+        contour, area, circularity = max(candidates, key=lambda candidate: candidate[1])
+
+    selected_mask = np.zeros_like(object_mask)
+    cv2.drawContours(selected_mask, [contour], -1, 255, thickness=-1)
+    selected_mask = cv2.bitwise_and(selected_mask, object_mask)
+    isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=selected_mask)
+    (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
+    detection = {
+        "contour": contour,
+        "center": (int(round(center_x)), int(round(center_y))),
+        "radius": int(round(radius)),
+        "circularity": float(circularity),
+    }
+    return isolated, detection
+
+
+def draw_detection(display, detection):
+    if detection is None:
+        return
+    cv2.drawContours(display, [detection["contour"]], -1, (255, 0, 255), 2)
+    if selected_object in ("Coin", "Ring") and detection["radius"] > 1:
+        cv2.circle(display, detection["center"], detection["radius"],
+                   (0, 255, 0), 2)
+
+
 def run_camera():
     global depth_frame_global, intrinsics_global, current_color_image
-    global calibration_mode, current_aoi
+    global calibration_mode, current_aoi, active_color_calibration
+    global background_removal_enabled
     current_aoi = load_aoi()
+    active_color_calibration = load_config().get(
+        "color_calibrations", {}).get(selected_object)
+    background_removal_enabled = True
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
@@ -275,6 +348,7 @@ def run_camera():
         pipeline.wait_for_frames()
     print("Camera ready.")
     print("A = Set AOI, D = Reset all AOIs, C = Colour calibration.")
+    print("B = Toggle calibrated background removal.")
     print("Click two points. R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
@@ -294,21 +368,34 @@ def run_camera():
             # unblended BGR frame to match RealSense Viewer color rendering.
             current_color_image = np.asanyarray(color_frame.get_data()).copy()
             left, top, right, bottom = current_aoi
-            display = current_color_image[top:bottom + 1,
+            cropped = current_color_image[top:bottom + 1,
                                           left:right + 1].copy()
             if calibration_mode:
+                display = cropped
                 draw_calibration(display)
                 instruction = "CALIBRATE: click background points {}/{}".format(
                     len(calibration_points), CALIBRATION_POINT_COUNT)
             else:
+                detection = None
+                if background_removal_enabled and active_color_calibration:
+                    display, detection = segment_object(cropped)
+                    draw_detection(display, detection)
+                else:
+                    display = cropped
                 draw_measurement(display)
-                instruction = "Mode: {} | Click two measurement points".format(
-                    selected_object)
+                if background_removal_enabled and not active_color_calibration:
+                    instruction = "Mode: {} | Press C to calibrate background".format(
+                        selected_object)
+                elif detection is not None:
+                    instruction = "Mode: {} | Object detected".format(selected_object)
+                else:
+                    instruction = "Mode: {} | Click two measurement points".format(
+                        selected_object)
             cv2.putText(display, instruction,
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                         (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
-                        "A = AOI  D = Default  C = Calibrate  R = Reset  M = Menu",
+                        "A=AOI D=Default C=Calibrate B=Background R=Reset M=Menu",
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
@@ -331,6 +418,10 @@ def run_camera():
                 reset_all_aois()
                 current_aoi = (0, 0, 639, 479)
                 clicked_points.clear()
+            if key in (ord("b"), ord("B")):
+                background_removal_enabled = not background_removal_enabled
+                print("Background removal {}.".format(
+                    "enabled" if background_removal_enabled else "disabled"))
             if key in (ord("c"), ord("C")):
                 calibration_mode = not calibration_mode
                 calibration_points.clear()
