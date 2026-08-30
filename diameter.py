@@ -17,6 +17,11 @@ SAMPLE_RADIUS = 5
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 FRAME_RATE = 30
+IMAGE_DISPLAY_WIDTH = 960
+IMAGE_DISPLAY_HEIGHT = 720
+CONTROL_PANEL_WIDTH = 360
+APP_DISPLAY_WIDTH = IMAGE_DISPLAY_WIDTH + CONTROL_PANEL_WIDTH
+APP_DISPLAY_HEIGHT = IMAGE_DISPLAY_HEIGHT
 MAX_RING_DIAMETER_CM = 5.0
 RING_DETECTOR_CONFIG = {
     "max_ring_diameter_cm": MAX_RING_DIAMETER_CM,
@@ -49,7 +54,9 @@ active_color_calibration = None
 background_removal_enabled = True
 latest_result = {}
 menu_requested = False
-menu_button_rect = None
+control_buttons = []
+pending_action = None
+display_image_rect = (0, 0, IMAGE_DISPLAY_WIDTH - 1, IMAGE_DISPLAY_HEIGHT - 1)
 last_detection_debug_reason = ""
 
 
@@ -252,20 +259,27 @@ def select_object():
 
 
 def mouse_callback(event, x, y, flags, param):
-    global clicked_points, latest_result, menu_requested
+    global clicked_points, latest_result, menu_requested, pending_action
     if event != cv2.EVENT_LBUTTONDOWN or depth_frame_global is None:
         return
 
-    if menu_button_rect is not None:
-        left, top, right, bottom = menu_button_rect
+    for action, left, top, right, bottom in control_buttons:
         if left <= x <= right and top <= y <= bottom:
-            menu_requested = True
+            pending_action = action
             return
 
-    # The live window is cropped, so translate clicks back to the aligned
-    # camera frame before sampling depth or colour.
-    x += current_aoi[0]
-    y += current_aoi[1]
+    image_left, image_top, image_right, image_bottom = display_image_rect
+    if not (image_left <= x <= image_right and image_top <= y <= image_bottom):
+        return
+
+    image_width = max(1, image_right - image_left + 1)
+    image_height = max(1, image_bottom - image_top + 1)
+    aoi_width = max(1, current_aoi[2] - current_aoi[0] + 1)
+    aoi_height = max(1, current_aoi[3] - current_aoi[1] + 1)
+    x = int(round((x - image_left) * aoi_width / image_width)) + current_aoi[0]
+    y = int(round((y - image_top) * aoi_height / image_height)) + current_aoi[1]
+    x = max(current_aoi[0], min(current_aoi[2], x))
+    y = max(current_aoi[1], min(current_aoi[3], y))
 
     if not point_in_aoi(x, y):
         print("Point is outside the AOI.")
@@ -843,18 +857,6 @@ def draw_detection(display, detection):
             cv2.drawContours(display, [detection["inner_contour"]], -1,
                              (0, 200, 255), 2)
         cv2.circle(display, detection["center"], 4, (255, 255, 255), -1)
-        inner_label = (
-            "{:.1f}px".format(detection["inner_diameter_px"])
-            if detection.get("inner_detected") else "not found")
-        label = "OD {:.1f}px ID {} score {:.2f}".format(
-            detection.get("outer_diameter_px", detection["radius"] * 2),
-            inner_label,
-            detection.get("score", 0.0))
-        cv2.putText(display, label,
-                    (max(5, detection["center"][0] - 120),
-                     max(20, detection["center"][1] - 15)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2,
-                    cv2.LINE_AA)
     if selected_object == "Bar" and detection["rectangle"] is not None:
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
@@ -868,93 +870,162 @@ def format_metric(value, unit="", precision=2):
         return str(value)
 
 
-def draw_ring_metrics_panel(display):
-    if selected_object != "Ring" or not latest_result:
-        return
+def draw_panel_text(panel, text, x, y, scale=0.5, color=(220, 225, 230),
+                    thickness=1):
+    cv2.putText(panel, text, (x, y), cv2.FONT_HERSHEY_SIMPLEX, scale, color,
+                thickness, cv2.LINE_AA)
 
-    height, width = display.shape[:2]
-    panel_width = min(340, max(260, width - 30))
-    line_height = 21
-    lines = [
-        ("Ring result", ""),
-        ("Outer major", format_metric(
-            latest_result.get("outer_major_axis_mm"), " mm")),
-        ("Outer minor", format_metric(
-            latest_result.get("outer_minor_axis_mm"), " mm")),
-        ("Inner status", latest_result.get("inner_status", "-")),
-        ("Inner major", format_metric(
-            latest_result.get("inner_major_axis_mm"), " mm")),
-        ("Inner minor", format_metric(
-            latest_result.get("inner_minor_axis_mm"), " mm")),
-        ("Outer equiv dia", format_metric(
-            latest_result.get("outer_diameter_mm"), " mm")),
-        ("Inner equiv dia", format_metric(
-            latest_result.get("inner_diameter_mm"), " mm")),
-        ("Ring area", format_metric(
-            latest_result.get("surface_area_mm2"), " mm2")),
-        ("Depth", format_metric(
-            latest_result.get("estimated_depth_mm"), " mm")),
-        ("Confidence", format_metric(
-            latest_result.get("confidence_score"), "", precision=3)),
+
+def draw_control_button(panel, label, action, x, y, width, height,
+                        enabled=True):
+    global control_buttons
+    color = (68, 102, 145) if enabled else (55, 60, 65)
+    text_color = (255, 255, 255) if enabled else (140, 145, 150)
+    cv2.rectangle(panel, (x, y), (x + width, y + height), color, -1)
+    cv2.rectangle(panel, (x, y), (x + width, y + height), (175, 185, 195), 1)
+    text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0]
+    text_x = x + max(6, (width - text_size[0]) // 2)
+    text_y = y + max(text_size[1] + 6, (height + text_size[1]) // 2)
+    draw_panel_text(panel, label, text_x, text_y, 0.48, text_color)
+    if enabled:
+        control_buttons.append((
+            action,
+            IMAGE_DISPLAY_WIDTH + x,
+            y,
+            IMAGE_DISPLAY_WIDTH + x + width,
+            y + height,
+        ))
+
+
+def result_lines_for_panel():
+    if not latest_result:
+        return [("Result", "No measurement yet")]
+    if selected_object == "Ring":
+        return [
+            ("Result", "Ring"),
+            ("Inner", latest_result.get("inner_status", "-")),
+            ("Outer major", format_metric(
+                latest_result.get("outer_major_axis_mm"), " mm")),
+            ("Outer minor", format_metric(
+                latest_result.get("outer_minor_axis_mm"), " mm")),
+            ("Outer dia", format_metric(
+                latest_result.get("outer_diameter_mm"), " mm")),
+            ("Inner major", format_metric(
+                latest_result.get("inner_major_axis_mm"), " mm")),
+            ("Inner minor", format_metric(
+                latest_result.get("inner_minor_axis_mm"), " mm")),
+            ("Inner dia", format_metric(
+                latest_result.get("inner_diameter_mm"), " mm")),
+            ("Area", format_metric(
+                latest_result.get("surface_area_mm2"), " mm2")),
+            ("Depth", format_metric(
+                latest_result.get("estimated_depth_mm"), " mm")),
+            ("Score", format_metric(
+                latest_result.get("confidence_score"), "", precision=3)),
+        ]
+    if selected_object == "Bar":
+        return [
+            ("Result", "Bar"),
+            ("Width", format_metric(latest_result.get("width_mm"), " mm")),
+            ("Length", format_metric(latest_result.get("length_mm"), " mm")),
+            ("Area", format_metric(
+                latest_result.get("surface_area_mm2"), " mm2")),
+            ("Thickness", format_metric(
+                latest_result.get("estimated_thickness_mm"), " mm")),
+            ("Depth", format_metric(
+                latest_result.get("estimated_depth_mm"), " mm")),
+        ]
+    return [
+        ("Result", selected_object),
+        ("Diameter", format_metric(latest_result.get("diameter_mm"), " mm")),
+        ("Area", format_metric(latest_result.get("surface_area_mm2"), " mm2")),
+        ("Depth", format_metric(latest_result.get("estimated_depth_mm"), " mm")),
     ]
-    panel_height = 18 + line_height * len(lines)
-    left = max(10, width - panel_width - 10)
-    top = 74
-    if top + panel_height > height - 10:
-        top = max(10, height - panel_height - 10)
-    right = min(width - 10, left + panel_width)
-    bottom = min(height - 10, top + panel_height)
-
-    overlay = display.copy()
-    cv2.rectangle(overlay, (left, top), (right, bottom), (20, 25, 30), -1)
-    cv2.addWeighted(overlay, 0.68, display, 0.32, 0, display)
-    cv2.rectangle(display, (left, top), (right, bottom), (255, 255, 255), 1)
-
-    y = top + 24
-    for index, (label, value) in enumerate(lines):
-        if index == 0:
-            cv2.putText(display, label, (left + 12, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2,
-                        cv2.LINE_AA)
-        else:
-            cv2.putText(display, label, (left + 12, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 220, 230), 1,
-                        cv2.LINE_AA)
-            cv2.putText(display, value, (left + 165, y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1,
-                        cv2.LINE_AA)
-        y += line_height
 
 
-def draw_menu_button(display):
-    global menu_button_rect
-    height, width = display.shape[:2]
-    if width < 80 or height < 50:
-        menu_button_rect = None
-        return
-    button_width = min(100, max(60, width - 20))
-    left = max(10, width - button_width - 10)
-    top = 10
-    right = min(width - 1, left + button_width)
-    bottom = min(height - 1, top + 36)
-    menu_button_rect = (left, top, right, bottom)
-    cv2.rectangle(display, (left, top), (right, bottom), (55, 75, 95), -1)
-    cv2.rectangle(display, (left, top), (right, bottom), (255, 255, 255), 1)
-    text_size = cv2.getTextSize("MENU", cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)[0]
-    text_x = left + max(2, (right - left - text_size[0]) // 2)
-    text_y = top + max(text_size[1] + 2, (bottom - top + text_size[1]) // 2)
-    cv2.putText(display, "MENU", (text_x, text_y), cv2.FONT_HERSHEY_SIMPLEX,
-                0.55, (255, 255, 255), 2, cv2.LINE_AA)
+def draw_control_panel(instruction, locked_detection):
+    global control_buttons
+    control_buttons = []
+    panel = np.full((APP_DISPLAY_HEIGHT, CONTROL_PANEL_WIDTH, 3),
+                    (31, 35, 42), dtype=np.uint8)
+
+    draw_panel_text(panel, "Vision Service", 18, 34, 0.72, (255, 255, 255), 2)
+    draw_panel_text(panel, "Mode: {}".format(selected_object), 18, 64,
+                    0.52, (180, 210, 255))
+    draw_panel_text(panel, instruction, 18, 90, 0.43, (200, 205, 210))
+
+    button_width = 148
+    button_height = 42
+    left_a = 18
+    left_b = 190
+    y = 120
+    draw_control_button(panel, "Detect", "detect", left_a, y, button_width,
+                        button_height)
+    draw_control_button(panel, "Reset", "reset", left_b, y, button_width,
+                        button_height)
+    y += 54
+    draw_control_button(panel, "Set AOI", "aoi", left_a, y, button_width,
+                        button_height)
+    draw_control_button(panel, "Default AOI", "default_aoi", left_b, y,
+                        button_width, button_height)
+    y += 54
+    draw_control_button(panel, "Calibrate", "calibrate", left_a, y,
+                        button_width, button_height)
+    draw_control_button(panel, "Toggle View", "toggle_view", left_b, y,
+                        button_width, button_height,
+                        enabled=locked_detection is not None)
+    y += 54
+    draw_control_button(panel, "Save Result", "save", left_a, y,
+                        button_width, button_height)
+    draw_control_button(panel, "Output File", "output", left_b, y,
+                        button_width, button_height)
+    y += 54
+    draw_control_button(panel, "Menu", "menu", left_a, y, button_width,
+                        button_height)
+    draw_control_button(panel, "Exit", "exit", left_b, y, button_width,
+                        button_height)
+
+    y += 76
+    draw_panel_text(panel, "Measurements", 18, y, 0.58, (255, 255, 255), 2)
+    y += 24
+    for label, value in result_lines_for_panel():
+        draw_panel_text(panel, label, 18, y, 0.45, (185, 195, 205))
+        draw_panel_text(panel, str(value), 136, y, 0.45, (0, 255, 255))
+        y += 22
+
+    if last_detection_debug_reason:
+        y = min(y + 12, APP_DISPLAY_HEIGHT - 74)
+        draw_panel_text(panel, "Detector", 18, y, 0.48, (255, 255, 255), 1)
+        y += 22
+        draw_panel_text(panel, last_detection_debug_reason[:36], 18, y,
+                        0.40, (235, 210, 110))
+    return panel
 
 
-def draw_debug_status(display):
-    if not last_detection_debug_reason:
-        return
-    height = display.shape[0]
-    text = "Detector: {}".format(last_detection_debug_reason[:95])
-    cv2.putText(display, text, (20, max(90, height - 18)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
-                cv2.LINE_AA)
+def compose_app_frame(camera_display, instruction, locked_detection):
+    global display_image_rect
+    image = np.full((IMAGE_DISPLAY_HEIGHT, IMAGE_DISPLAY_WIDTH, 3),
+                    (12, 14, 18), dtype=np.uint8)
+    source_height, source_width = camera_display.shape[:2]
+    scale = min(
+        IMAGE_DISPLAY_WIDTH / max(1, source_width),
+        IMAGE_DISPLAY_HEIGHT / max(1, source_height),
+    )
+    resized_width = max(1, int(round(source_width * scale)))
+    resized_height = max(1, int(round(source_height * scale)))
+    resized = cv2.resize(camera_display, (resized_width, resized_height),
+                         interpolation=cv2.INTER_AREA)
+    left = (IMAGE_DISPLAY_WIDTH - resized_width) // 2
+    top = (IMAGE_DISPLAY_HEIGHT - resized_height) // 2
+    image[top:top + resized_height, left:left + resized_width] = resized
+    panel = draw_control_panel(instruction, locked_detection)
+    display_image_rect = (
+        left,
+        top,
+        left + resized_width - 1,
+        top + resized_height - 1,
+    )
+    return np.hstack((image, panel))
 
 
 def should_show_isolated_detection():
@@ -1152,13 +1223,14 @@ def run_camera():
     global depth_frame_global, intrinsics_global, current_color_image
     global calibration_mode, current_aoi, active_color_calibration
     global background_removal_enabled, latest_result, menu_requested
-    global last_detection_debug_reason
+    global last_detection_debug_reason, pending_action
     current_aoi = load_aoi()
     active_color_calibration = load_config().get(
         "color_calibrations", {}).get(selected_object)
     background_removal_enabled = True
     latest_result = {}
     menu_requested = False
+    pending_action = None
     last_detection_debug_reason = ""
     locked_detection = None
     pipeline = rs.pipeline()
@@ -1216,7 +1288,6 @@ def run_camera():
                     if locked_detection is not None:
                         draw_detection(display, locked_detection)
                 draw_measurement(display)
-                draw_ring_metrics_panel(display)
                 if locked_detection is not None:
                     instruction = "Mode: {} | Detection locked".format(selected_object)
                 elif selected_object == "Ring":
@@ -1226,30 +1297,46 @@ def run_camera():
                         selected_object)
                 else:
                     instruction = "Mode: {} | Press D to detect".format(selected_object)
-            cv2.putText(display, instruction,
-                        (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
-                        (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(display,
-                        "A=AOI X=Default C=Cal D=Detect R=Reset S=Save O=Output",
-                        (20, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
-                        cv2.LINE_AA)
-            draw_debug_status(display)
-            draw_menu_button(display)
-            cv2.imshow(WINDOW_NAME, display)
+            app_frame = compose_app_frame(display, instruction, locked_detection)
+            cv2.imshow(WINDOW_NAME, app_frame)
 
             key = cv2.waitKey(1) & 0xFF
             if menu_requested:
                 return True
-            if key == 27:
+            action = pending_action
+            pending_action = None
+            if key in (ord("d"), ord("D")):
+                action = "detect"
+            elif key in (ord("r"), ord("R")):
+                action = "reset"
+            elif key in (ord("a"), ord("A")):
+                action = "aoi"
+            elif key in (ord("x"), ord("X")):
+                action = "default_aoi"
+            elif key in (ord("b"), ord("B")):
+                action = "toggle_view"
+            elif key in (ord("c"), ord("C")):
+                action = "calibrate"
+            elif key in (ord("m"), ord("M")):
+                action = "menu"
+            elif key in (ord("s"), ord("S")):
+                action = "save"
+            elif key in (ord("o"), ord("O")):
+                action = "output"
+            elif key == 27:
+                action = "exit"
+
+            if action == "exit":
                 return False
-            if key in (ord("r"), ord("R")):
+            if action == "menu":
+                return True
+            if action == "reset":
                 clicked_points.clear()
                 locked_detection = None
                 latest_result = {}
                 last_detection_debug_reason = ""
                 print("Measurement and detection reset.")
-            if key in (ord("a"), ord("A")):
+            if action == "aoi":
                 calibration_mode = False
                 clicked_points.clear()
                 calibration_points.clear()
@@ -1259,14 +1346,14 @@ def run_camera():
                 last_detection_debug_reason = ""
                 choose_aoi()
                 cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
-            if key in (ord("x"), ord("X")):
+            if action == "default_aoi":
                 reset_all_aois()
                 current_aoi = (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
                 clicked_points.clear()
                 locked_detection = None
                 latest_result = {}
                 last_detection_debug_reason = ""
-            if key in (ord("d"), ord("D")):
+            if action == "detect":
                 if selected_object != "Ring" and not active_color_calibration:
                     print("No colour calibration. Press C and sample 9 background points first.")
                 else:
@@ -1284,7 +1371,7 @@ def run_camera():
                         print("{} detection locked. Press R to clear it.".format(
                             selected_object))
                         print("Estimated result:", latest_result)
-            if key in (ord("b"), ord("B")):
+            if action == "toggle_view":
                 background_removal_enabled = not background_removal_enabled
                 if selected_object == "Ring":
                     print("Ring view: {}.".format(
@@ -1293,7 +1380,7 @@ def run_camera():
                 else:
                     print("Background removal {}.".format(
                         "enabled" if background_removal_enabled else "disabled"))
-            if key in (ord("c"), ord("C")):
+            if action == "calibrate":
                 calibration_mode = not calibration_mode
                 calibration_points.clear()
                 calibration_samples.clear()
@@ -1306,11 +1393,9 @@ def run_camera():
                     print("Click 9 clean background locations spread across the image.")
                 else:
                     print("Colour calibration cancelled.")
-            if key in (ord("m"), ord("M")):
-                return True
-            if key in (ord("s"), ord("S")):
+            if action == "save":
                 save_result_dialog()
-            if key in (ord("o"), ord("O")):
+            if action == "output":
                 choose_results_file_dialog()
     finally:
         depth_frame_global = None
@@ -1318,6 +1403,7 @@ def run_camera():
         current_color_image = None
         calibration_mode = False
         menu_requested = False
+        pending_action = None
         last_detection_debug_reason = ""
         pipeline.stop()
         cv2.destroyWindow(WINDOW_NAME)
