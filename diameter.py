@@ -1,3 +1,6 @@
+import json
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pyrealsense2 as rs
@@ -6,11 +9,75 @@ import pyrealsense2 as rs
 WINDOW_NAME = "D405 Vision Measurement"
 MENU_NAME = "Select Measurement Type"
 OBJECT_OPTIONS = ["Coin", "Ring", "Bar", "Chain"]
+CALIBRATION_FILE = Path(__file__).with_name("vision_config.json")
+CALIBRATION_POINT_COUNT = 9
+SAMPLE_RADIUS = 5
 
 clicked_points = []
 depth_frame_global = None
 intrinsics_global = None
 selected_object = None
+current_color_image = None
+calibration_mode = False
+calibration_points = []
+calibration_samples = []
+
+
+def load_config():
+    if not CALIBRATION_FILE.exists():
+        return {"version": 1, "color_calibrations": {}}
+    try:
+        with CALIBRATION_FILE.open("r", encoding="utf-8") as config_file:
+            return json.load(config_file)
+    except (OSError, ValueError) as error:
+        print("Could not load {}: {}".format(CALIBRATION_FILE, error))
+        return {"version": 1, "color_calibrations": {}}
+
+
+def save_color_calibration(samples):
+    """Save a robust Lab background model for the selected object mode."""
+    pixels = np.concatenate(samples, axis=0).astype(np.float32)
+    center = np.median(pixels, axis=0)
+    median_deviation = np.median(np.abs(pixels - center), axis=0)
+    spread = np.maximum(median_deviation * 1.4826, 2.0)
+
+    config_data = load_config()
+    calibrations = config_data.setdefault("color_calibrations", {})
+    calibrations[selected_object] = {
+        "color_space": "OpenCV Lab",
+        "lab_median": center.round(3).tolist(),
+        "lab_spread": spread.round(3).tolist(),
+        "sample_points": [list(point) for point in calibration_points],
+        "sample_patch_size": SAMPLE_RADIUS * 2 + 1,
+        "resolution": [int(current_color_image.shape[1]),
+                       int(current_color_image.shape[0])],
+    }
+    with CALIBRATION_FILE.open("w", encoding="utf-8") as config_file:
+        json.dump(config_data, config_file, indent=2)
+        config_file.write("\n")
+
+    print("Saved {} background calibration to {}".format(
+        selected_object, CALIBRATION_FILE))
+    print("Lab median:", center.round(2).tolist())
+    print("Lab spread:", spread.round(2).tolist())
+
+
+def add_calibration_point(x, y):
+    global calibration_mode
+    height, width = current_color_image.shape[:2]
+    left, right = max(0, x - SAMPLE_RADIUS), min(width, x + SAMPLE_RADIUS + 1)
+    top, bottom = max(0, y - SAMPLE_RADIUS), min(height, y + SAMPLE_RADIUS + 1)
+    patch = current_color_image[top:bottom, left:right]
+    lab_patch = cv2.cvtColor(patch, cv2.COLOR_BGR2LAB).reshape(-1, 3)
+    calibration_points.append((x, y))
+    calibration_samples.append(lab_patch)
+    print("Calibration point {}/{}: ({}, {})".format(
+        len(calibration_points), CALIBRATION_POINT_COUNT, x, y))
+
+    if len(calibration_points) == CALIBRATION_POINT_COUNT:
+        save_color_calibration(calibration_samples)
+        calibration_mode = False
+        print("Colour calibration complete. Measurement mode restored.")
 
 
 def draw_menu():
@@ -67,6 +134,10 @@ def mouse_callback(event, x, y, flags, param):
     if event != cv2.EVENT_LBUTTONDOWN or depth_frame_global is None:
         return
 
+    if calibration_mode and current_color_image is not None:
+        add_calibration_point(x, y)
+        return
+
     depth = depth_frame_global.get_distance(x, y)
     if depth <= 0:
         print("Invalid depth at this point.")
@@ -116,8 +187,17 @@ def draw_measurement(display):
                 0.8, (255, 255, 255), 2, cv2.LINE_AA)
 
 
+def draw_calibration(display):
+    for index, (x, y) in enumerate(calibration_points):
+        cv2.circle(display, (x, y), SAMPLE_RADIUS + 3, (0, 255, 255), 2)
+        cv2.putText(display, str(index + 1), (x + 10, y - 8),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
+                    cv2.LINE_AA)
+
+
 def run_camera():
-    global depth_frame_global, intrinsics_global
+    global depth_frame_global, intrinsics_global, current_color_image
+    global calibration_mode
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
@@ -130,7 +210,7 @@ def run_camera():
     for _ in range(30):
         pipeline.wait_for_frames()
     print("Camera ready.")
-    print("Click two points. R = Reset, M = Menu, ESC = Exit.")
+    print("Click two points. C = Colour calibration, R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
     cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
@@ -147,13 +227,22 @@ def run_camera():
 
             # The old JET depth blend changed every visible color. Display the
             # unblended BGR frame to match RealSense Viewer color rendering.
-            display = np.asanyarray(color_frame.get_data()).copy()
-            draw_measurement(display)
-            cv2.putText(display,
-                        "Mode: {} | Click two measurement points".format(selected_object),
+            current_color_image = np.asanyarray(color_frame.get_data()).copy()
+            display = current_color_image.copy()
+            if calibration_mode:
+                draw_calibration(display)
+                instruction = "CALIBRATE: click background points {}/{}".format(
+                    len(calibration_points), CALIBRATION_POINT_COUNT)
+            else:
+                draw_measurement(display)
+                instruction = "Mode: {} | Click two measurement points".format(
+                    selected_object)
+            cv2.putText(display, instruction,
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                         (255, 255, 255), 2, cv2.LINE_AA)
-            cv2.putText(display, "R = Reset   M = Menu   ESC = Exit", (20, 60),
+            cv2.putText(display,
+                        "C = Calibrate   R = Reset   M = Menu   ESC = Exit",
+                        (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
             cv2.imshow(WINDOW_NAME, display)
@@ -164,11 +253,23 @@ def run_camera():
             if key in (ord("r"), ord("R")):
                 clicked_points.clear()
                 print("Measurement reset.")
+            if key in (ord("c"), ord("C")):
+                calibration_mode = not calibration_mode
+                calibration_points.clear()
+                calibration_samples.clear()
+                if calibration_mode:
+                    clicked_points.clear()
+                    print("Colour calibration started.")
+                    print("Click 9 clean background locations spread across the image.")
+                else:
+                    print("Colour calibration cancelled.")
             if key in (ord("m"), ord("M")):
                 return True
     finally:
         depth_frame_global = None
         intrinsics_global = None
+        current_color_image = None
+        calibration_mode = False
         pipeline.stop()
         cv2.destroyWindow(WINDOW_NAME)
 
