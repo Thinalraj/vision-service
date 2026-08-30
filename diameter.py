@@ -744,12 +744,15 @@ def draw_control_panel(instruction, locked_detection):
     y += 54
     draw_control_button(panel, "Save Result", "save", left_a, y,
                         button_width, button_height)
-    draw_control_button(panel, "Output File", "output", left_b, y,
+    draw_control_button(panel, "Save Image", "save_image", left_b, y,
                         button_width, button_height)
     y += 54
-    draw_control_button(panel, "Menu", "menu", left_a, y, button_width,
+    draw_control_button(panel, "Output File", "output", left_a, y,
+                        button_width, button_height)
+    draw_control_button(panel, "Menu", "menu", left_b, y, button_width,
                         button_height)
-    draw_control_button(panel, "Exit", "exit", left_b, y, button_width,
+    y += 54
+    draw_control_button(panel, "Exit", "exit", left_a, y, button_width,
                         button_height)
 
     y += 76
@@ -974,6 +977,34 @@ def choose_results_file_dialog():
     root.destroy()
 
 
+def save_image_dialog():
+    """Save the current raw AOI crop, including its background, for samples."""
+    if current_color_image is None:
+        print("No camera image available to save.")
+        return
+    import tkinter as tk
+    from tkinter import filedialog
+
+    left, top, right, bottom = current_aoi
+    image = current_color_image[top:bottom + 1, left:right + 1]
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    path = filedialog.asksaveasfilename(
+        parent=root,
+        title="Save AOI image sample",
+        initialfile="sample_{}.png".format(datetime.now().strftime("%Y%m%d_%H%M%S")),
+        defaultextension=".png",
+        filetypes=[("PNG image", "*.png"), ("JPEG image", "*.jpg"),
+                   ("All files", "*.*")],
+    )
+    root.destroy()
+    if path and cv2.imwrite(path, image):
+        print("Saved raw AOI image sample to {}".format(path))
+    elif path:
+        print("Could not save image to {}".format(path))
+
+
 def save_result_dialog():
     """Ask for an item name and append the result to the configured CSV."""
     if not latest_result:
@@ -1090,7 +1121,7 @@ def run_camera():
         pipeline.wait_for_frames()
     print("Camera ready.")
     print("A = Set AOI, X = Reset all AOIs, C = Colour calibration.")
-    print("D = Detect once, B = Toggle view, S = Save, O = Choose results file.")
+    print("D = Detect once, B = Toggle view, S = Save result, I = Save AOI image, O = Choose results file.")
     print("Click two points. R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
@@ -1159,6 +1190,8 @@ def run_camera():
                 action = "menu"
             elif key in (ord("s"), ord("S")):
                 action = "save"
+            elif key in (ord("i"), ord("I")):
+                action = "save_image"
             elif key in (ord("o"), ord("O")):
                 action = "output"
             elif key == 27:
@@ -1246,6 +1279,8 @@ def run_camera():
                     print("Colour calibration cancelled.")
             if action == "save":
                 save_result_dialog()
+            if action == "save_image":
+                save_image_dialog()
             if action == "output":
                 choose_results_file_dialog()
     finally:
