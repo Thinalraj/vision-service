@@ -345,6 +345,7 @@ def segment_object(cropped_bgr):
         "circularity": float(circularity),
         "rectangle": None,
         "rectangularity": rectangularity,
+        "mask": selected_mask,
     }
     if rectangle is not None:
         detection["rectangle"] = np.int32(cv2.boxPoints(rectangle))
@@ -370,6 +371,7 @@ def run_camera():
     active_color_calibration = load_config().get(
         "color_calibrations", {}).get(selected_object)
     background_removal_enabled = True
+    locked_detection = None
     pipeline = rs.pipeline()
     config = rs.config()
     config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
@@ -382,8 +384,8 @@ def run_camera():
     for _ in range(30):
         pipeline.wait_for_frames()
     print("Camera ready.")
-    print("A = Set AOI, D = Reset all AOIs, C = Colour calibration.")
-    print("B = Toggle calibrated background removal.")
+    print("A = Set AOI, X = Reset all AOIs, C = Colour calibration.")
+    print("D = Detect once, B = Toggle detected background removal.")
     print("Click two points. R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
@@ -411,26 +413,25 @@ def run_camera():
                 instruction = "CALIBRATE: click background points {}/{}".format(
                     len(calibration_points), CALIBRATION_POINT_COUNT)
             else:
-                detection = None
-                if background_removal_enabled and active_color_calibration:
-                    display, detection = segment_object(cropped)
-                    draw_detection(display, detection)
+                if background_removal_enabled and locked_detection is not None:
+                    display = cv2.bitwise_and(
+                        cropped, cropped, mask=locked_detection["mask"])
+                    draw_detection(display, locked_detection)
                 else:
                     display = cropped
                 draw_measurement(display)
-                if background_removal_enabled and not active_color_calibration:
+                if not active_color_calibration:
                     instruction = "Mode: {} | Press C to calibrate background".format(
                         selected_object)
-                elif detection is not None:
-                    instruction = "Mode: {} | Object detected".format(selected_object)
+                elif locked_detection is not None:
+                    instruction = "Mode: {} | Detection locked".format(selected_object)
                 else:
-                    instruction = "Mode: {} | Click two measurement points".format(
-                        selected_object)
+                    instruction = "Mode: {} | Press D to detect".format(selected_object)
             cv2.putText(display, instruction,
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                         (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
-                        "A=AOI D=Default C=Calibrate B=Background R=Reset M=Menu",
+                        "A=AOI X=Default C=Calibrate D=Detect B=View R=Reset",
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
@@ -441,18 +442,33 @@ def run_camera():
                 return False
             if key in (ord("r"), ord("R")):
                 clicked_points.clear()
-                print("Measurement reset.")
+                locked_detection = None
+                print("Measurement and detection reset.")
             if key in (ord("a"), ord("A")):
                 calibration_mode = False
                 clicked_points.clear()
                 calibration_points.clear()
                 calibration_samples.clear()
+                locked_detection = None
                 choose_aoi()
                 cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
-            if key in (ord("d"), ord("D")):
+            if key in (ord("x"), ord("X")):
                 reset_all_aois()
                 current_aoi = (0, 0, 639, 479)
                 clicked_points.clear()
+                locked_detection = None
+            if key in (ord("d"), ord("D")):
+                if not active_color_calibration:
+                    print("No colour calibration. Press C and sample 9 background points first.")
+                else:
+                    _, new_detection = segment_object(cropped)
+                    if new_detection is None:
+                        print("No valid {} object detected.".format(selected_object.lower()))
+                    else:
+                        locked_detection = new_detection
+                        background_removal_enabled = True
+                        print("{} detection locked. Press R to clear it.".format(
+                            selected_object))
             if key in (ord("b"), ord("B")):
                 background_removal_enabled = not background_removal_enabled
                 print("Background removal {}.".format(
@@ -461,6 +477,7 @@ def run_camera():
                 calibration_mode = not calibration_mode
                 calibration_points.clear()
                 calibration_samples.clear()
+                locked_detection = None
                 if calibration_mode:
                     clicked_points.clear()
                     print("Colour calibration started.")
