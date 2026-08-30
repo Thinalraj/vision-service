@@ -426,6 +426,30 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
             depth_m / intrinsics.fx + depth_m / intrinsics.fy
         ) * 0.5 * 1000.0
         metrics["diameter_mm"] = 2.0 * detection["radius"] * scale_mm_per_pixel
+    if selected_object == "Bar" and detection["rectangle"] is not None:
+        box = detection["rectangle"].astype(np.float32)
+        side_lengths_mm = []
+        for index in range(4):
+            point_a = box[index]
+            point_b = box[(index + 1) % 4]
+            delta_x_mm = (point_b[0] - point_a[0]) * depth_m / intrinsics.fx * 1000.0
+            delta_y_mm = (point_b[1] - point_a[1]) * depth_m / intrinsics.fy * 1000.0
+            side_lengths_mm.append(float(np.hypot(delta_x_mm, delta_y_mm)))
+        unique_sides = [
+            (side_lengths_mm[0] + side_lengths_mm[2]) * 0.5,
+            (side_lengths_mm[1] + side_lengths_mm[3]) * 0.5,
+        ]
+        width_mm, length_mm = sorted(unique_sides)
+        metrics["width_mm"] = width_mm
+        metrics["length_mm"] = length_mm
+        metrics["surface_area_mm2"] = width_mm * length_mm
+
+        background_depth = depth_crop[
+            (detection["mask"] == 0) & (depth_crop > 0)]
+        if background_depth.size > 0:
+            background_depth_m = float(np.median(background_depth)) * depth_scale
+            metrics["estimated_thickness_mm"] = max(
+                0.0, (background_depth_m - depth_m) * 1000.0)
     return metrics
 
 
@@ -465,19 +489,26 @@ def save_result_dialog():
         "item_name": item_name,
         "object_type": selected_object,
         "diameter_mm": latest_result.get("diameter_mm", ""),
+        "width_mm": latest_result.get("width_mm", ""),
+        "length_mm": latest_result.get("length_mm", ""),
         "surface_area_mm2": latest_result.get("surface_area_mm2", ""),
         "estimated_depth_mm": latest_result.get("estimated_depth_mm", ""),
+        "estimated_thickness_mm": latest_result.get("estimated_thickness_mm", ""),
         "aoi_x1": current_aoi[0],
         "aoi_y1": current_aoi[1],
         "aoi_x2": current_aoi[2],
         "aoi_y2": current_aoi[3],
     }
     fieldnames = list(row.keys())
-    file_exists = Path(csv_path).exists() and Path(csv_path).stat().st_size > 0
-    with open(csv_path, "a", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
-        if not file_exists:
-            writer.writeheader()
+    existing_rows = []
+    if Path(csv_path).exists() and Path(csv_path).stat().st_size > 0:
+        with open(csv_path, "r", newline="", encoding="utf-8") as csv_file:
+            existing_rows = list(csv.DictReader(csv_file))
+    with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(
+            csv_file, fieldnames=fieldnames, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(existing_rows)
         writer.writerow(row)
     print("Saved result for '{}' to {}".format(item_name, csv_path))
 
