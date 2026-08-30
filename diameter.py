@@ -295,12 +295,41 @@ def segment_object(cropped_bgr):
     if not candidates:
         return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
 
+    rectangle = None
+    rectangularity = None
     if selected_object in ("Coin", "Ring"):
         circular = [candidate for candidate in candidates if candidate[2] >= 0.55]
         if not circular:
             return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
         contour, area, circularity = max(
             circular, key=lambda candidate: candidate[1] * candidate[2])
+    elif selected_object == "Bar":
+        rectangular = []
+        for candidate in candidates:
+            candidate_contour, candidate_area, candidate_circularity = candidate
+            hull = cv2.convexHull(candidate_contour)
+            hull_perimeter = cv2.arcLength(hull, True)
+            corners = cv2.approxPolyDP(hull, 0.03 * hull_perimeter, True)
+            if len(corners) < 4 or len(corners) > 6:
+                continue
+            candidate_rectangle = cv2.minAreaRect(candidate_contour)
+            rect_width, rect_height = candidate_rectangle[1]
+            rectangle_area = rect_width * rect_height
+            if rectangle_area <= 0:
+                continue
+            candidate_rectangularity = candidate_area / rectangle_area
+            if candidate_rectangularity >= 0.65:
+                rectangular.append((
+                    candidate_contour,
+                    candidate_area,
+                    candidate_circularity,
+                    candidate_rectangle,
+                    candidate_rectangularity,
+                ))
+        if not rectangular:
+            return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
+        contour, area, circularity, rectangle, rectangularity = max(
+            rectangular, key=lambda candidate: candidate[1] * candidate[4])
     else:
         contour, area, circularity = max(candidates, key=lambda candidate: candidate[1])
 
@@ -314,7 +343,11 @@ def segment_object(cropped_bgr):
         "center": (int(round(center_x)), int(round(center_y))),
         "radius": int(round(radius)),
         "circularity": float(circularity),
+        "rectangle": None,
+        "rectangularity": rectangularity,
     }
+    if rectangle is not None:
+        detection["rectangle"] = np.int32(cv2.boxPoints(rectangle))
     return isolated, detection
 
 
@@ -325,6 +358,8 @@ def draw_detection(display, detection):
     if selected_object in ("Coin", "Ring") and detection["radius"] > 1:
         cv2.circle(display, detection["center"], detection["radius"],
                    (0, 255, 0), 2)
+    if selected_object == "Bar" and detection["rectangle"] is not None:
+        cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
 
 def run_camera():
