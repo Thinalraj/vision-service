@@ -324,13 +324,22 @@ def segment_object(cropped_bgr):
     background = np.all(np.abs(lab_image - center) <= tolerance, axis=2)
     object_mask = (~background).astype(np.uint8) * 255
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel)
-    object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
+    kernel_size = 3 if selected_object == "Ring" else 5
+    kernel = cv2.getStructuringElement(
+        cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    if selected_object == "Ring":
+        # Closing fills small breaks without eroding a thin ring band away.
+        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
+    else:
+        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_OPEN, kernel)
+        object_mask = cv2.morphologyEx(object_mask, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(
         object_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    minimum_area = max(100.0, cropped_bgr.shape[0] * cropped_bgr.shape[1] * 0.002)
+    area_fraction = 0.0002 if selected_object == "Ring" else 0.002
+    minimum_area = max(
+        30.0 if selected_object == "Ring" else 100.0,
+        cropped_bgr.shape[0] * cropped_bgr.shape[1] * area_fraction)
     candidates = []
     for contour in contours:
         area = cv2.contourArea(contour)
@@ -345,12 +354,35 @@ def segment_object(cropped_bgr):
 
     rectangle = None
     rectangularity = None
-    if selected_object in ("Coin", "Ring"):
+    outer_ellipse = None
+    if selected_object == "Coin":
         circular = [candidate for candidate in candidates if candidate[2] >= 0.55]
         if not circular:
             return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
         contour, area, circularity = max(
             circular, key=lambda candidate: candidate[1] * candidate[2])
+    elif selected_object == "Ring":
+        elliptical = []
+        for candidate in candidates:
+            candidate_contour, candidate_area, candidate_circularity = candidate
+            if len(candidate_contour) < 5:
+                continue
+            candidate_ellipse = cv2.fitEllipse(candidate_contour)
+            axis_a, axis_b = candidate_ellipse[1]
+            major_axis = max(axis_a, axis_b)
+            minor_axis = min(axis_a, axis_b)
+            if major_axis <= 1 or minor_axis / major_axis < 0.25:
+                continue
+            ellipse_area = np.pi * axis_a * axis_b * 0.25
+            area_fit = min(candidate_area, ellipse_area) / max(candidate_area, ellipse_area)
+            if area_fit >= 0.60:
+                elliptical.append((
+                    candidate_contour, candidate_area, candidate_circularity,
+                    candidate_ellipse, area_fit))
+        if not elliptical:
+            return cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=object_mask), None
+        contour, area, circularity, outer_ellipse, _ = max(
+            elliptical, key=lambda candidate: candidate[1] * candidate[4])
     elif selected_object == "Bar":
         rectangular = []
         for candidate in candidates:
@@ -387,6 +419,7 @@ def segment_object(cropped_bgr):
     isolated = cv2.bitwise_and(cropped_bgr, cropped_bgr, mask=selected_mask)
     (center_x, center_y), radius = cv2.minEnclosingCircle(contour)
     inner_circle = None
+    inner_ellipse = None
     if selected_object == "Ring":
         outer_fill = np.zeros_like(object_mask)
         cv2.drawContours(outer_fill, [contour], -1, 255, thickness=-1)
@@ -394,22 +427,34 @@ def segment_object(cropped_bgr):
         hole_contours, _ = cv2.findContours(
             hole_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         valid_holes = []
-        minimum_hole_area = max(50.0, area * 0.03)
+        minimum_hole_area = max(20.0, area * 0.015)
         for hole_contour in hole_contours:
             hole_area = cv2.contourArea(hole_contour)
-            hole_perimeter = cv2.arcLength(hole_contour, True)
-            if hole_area < minimum_hole_area or hole_perimeter <= 0:
+            if hole_area < minimum_hole_area or len(hole_contour) < 5:
                 continue
-            hole_circularity = (
-                4.0 * np.pi * hole_area / (hole_perimeter * hole_perimeter))
-            if hole_circularity >= 0.50:
-                valid_holes.append((hole_contour, hole_area, hole_circularity))
+            hole_ellipse = cv2.fitEllipse(hole_contour)
+            hole_axis_a, hole_axis_b = hole_ellipse[1]
+            hole_major = max(hole_axis_a, hole_axis_b)
+            hole_minor = min(hole_axis_a, hole_axis_b)
+            if hole_major <= 1 or hole_minor / hole_major < 0.25:
+                continue
+            hole_ellipse_area = np.pi * hole_axis_a * hole_axis_b * 0.25
+            hole_fit = min(hole_area, hole_ellipse_area) / max(
+                hole_area, hole_ellipse_area)
+            if hole_fit >= 0.55:
+                valid_holes.append((hole_contour, hole_area, hole_ellipse, hole_fit))
         if valid_holes:
-            inner_contour, _, _ = max(
-                valid_holes, key=lambda candidate: candidate[1] * candidate[2])
+            inner_contour, _, inner_ellipse, _ = max(
+                valid_holes, key=lambda candidate: candidate[1] * candidate[3])
             (inner_x, inner_y), inner_radius = cv2.minEnclosingCircle(inner_contour)
             center_offset = np.hypot(inner_x - center_x, inner_y - center_y)
-            if inner_radius > 1 and center_offset <= radius * 0.35:
+            outer_axes = sorted(outer_ellipse[1])
+            inner_axes = sorted(inner_ellipse[1])
+            axes_are_nested = (
+                inner_axes[0] < outer_axes[0] * 0.98 and
+                inner_axes[1] < outer_axes[1] * 0.98)
+            if (inner_radius > 1 and center_offset <= radius * 0.45 and
+                    axes_are_nested):
                 inner_circle = {
                     "center": (int(round(inner_x)), int(round(inner_y))),
                     "radius": int(round(inner_radius)),
@@ -425,6 +470,8 @@ def segment_object(cropped_bgr):
         "rectangularity": rectangularity,
         "mask": selected_mask,
         "inner_circle": inner_circle,
+        "outer_ellipse": outer_ellipse,
+        "inner_ellipse": inner_ellipse,
     }
     if rectangle is not None:
         detection["rectangle"] = np.int32(cv2.boxPoints(rectangle))
@@ -435,12 +482,12 @@ def draw_detection(display, detection):
     if detection is None:
         return
     cv2.drawContours(display, [detection["contour"]], -1, (255, 0, 255), 2)
-    if selected_object in ("Coin", "Ring") and detection["radius"] > 1:
+    if selected_object == "Coin" and detection["radius"] > 1:
         cv2.circle(display, detection["center"], detection["radius"],
                    (0, 255, 0), 2)
-    if selected_object == "Ring" and detection["inner_circle"] is not None:
-        cv2.circle(display, detection["inner_circle"]["center"],
-                   detection["inner_circle"]["radius"], (0, 200, 255), 2)
+    if selected_object == "Ring" and detection["outer_ellipse"] is not None:
+        cv2.ellipse(display, detection["outer_ellipse"], (0, 255, 0), 2)
+        cv2.ellipse(display, detection["inner_ellipse"], (0, 200, 255), 2)
     if selected_object == "Bar" and detection["rectangle"] is not None:
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
@@ -484,20 +531,32 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
         "estimated_depth_mm": depth_m * 1000.0,
         "surface_area_mm2": surface_area_mm2,
     }
-    if selected_object in ("Coin", "Ring"):
+    if selected_object == "Coin":
         scale_mm_per_pixel = (
             depth_m / intrinsics.fx + depth_m / intrinsics.fy
         ) * 0.5 * 1000.0
         metrics["diameter_mm"] = 2.0 * detection["radius"] * scale_mm_per_pixel
         metrics["outer_diameter_mm"] = metrics["diameter_mm"]
-        if selected_object == "Ring" and detection["inner_circle"] is not None:
-            inner_diameter_mm = (
-                2.0 * detection["inner_circle"]["radius"] * scale_mm_per_pixel)
-            metrics["inner_diameter_mm"] = inner_diameter_mm
-            metrics["surface_area_mm2"] = (
-                np.pi * 0.25 *
-                (metrics["outer_diameter_mm"] ** 2 - inner_diameter_mm ** 2)
-            )
+    if selected_object == "Ring" and detection["inner_ellipse"] is not None:
+        scale_mm_per_pixel = (
+            depth_m / intrinsics.fx + depth_m / intrinsics.fy
+        ) * 0.5 * 1000.0
+        outer_axes_mm = sorted(
+            axis * scale_mm_per_pixel for axis in detection["outer_ellipse"][1])
+        inner_axes_mm = sorted(
+            axis * scale_mm_per_pixel for axis in detection["inner_ellipse"][1])
+        metrics["outer_minor_axis_mm"] = outer_axes_mm[0]
+        metrics["outer_major_axis_mm"] = outer_axes_mm[1]
+        metrics["inner_minor_axis_mm"] = inner_axes_mm[0]
+        metrics["inner_major_axis_mm"] = inner_axes_mm[1]
+        metrics["outer_diameter_mm"] = float(np.sqrt(outer_axes_mm[0] * outer_axes_mm[1]))
+        metrics["inner_diameter_mm"] = float(np.sqrt(inner_axes_mm[0] * inner_axes_mm[1]))
+        metrics["diameter_mm"] = metrics["outer_diameter_mm"]
+        metrics["surface_area_mm2"] = (
+            np.pi * 0.25 *
+            (outer_axes_mm[0] * outer_axes_mm[1] -
+             inner_axes_mm[0] * inner_axes_mm[1])
+        )
     if selected_object == "Bar" and detection["rectangle"] is not None:
         box = detection["rectangle"].astype(np.float32)
         side_lengths_mm = []
@@ -587,6 +646,10 @@ def save_result_dialog():
         "diameter_mm": latest_result.get("diameter_mm", ""),
         "outer_diameter_mm": latest_result.get("outer_diameter_mm", ""),
         "inner_diameter_mm": latest_result.get("inner_diameter_mm", ""),
+        "outer_major_axis_mm": latest_result.get("outer_major_axis_mm", ""),
+        "outer_minor_axis_mm": latest_result.get("outer_minor_axis_mm", ""),
+        "inner_major_axis_mm": latest_result.get("inner_major_axis_mm", ""),
+        "inner_minor_axis_mm": latest_result.get("inner_minor_axis_mm", ""),
         "width_mm": latest_result.get("width_mm", ""),
         "length_mm": latest_result.get("length_mm", ""),
         "surface_area_mm2": latest_result.get("surface_area_mm2", ""),
