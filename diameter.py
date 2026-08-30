@@ -821,6 +821,72 @@ def draw_detection(display, detection):
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
 
+def format_metric(value, unit="", precision=2):
+    if value == "" or value is None:
+        return "-"
+    try:
+        return "{:.{}f}{}".format(float(value), precision, unit)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def draw_ring_metrics_panel(display):
+    if selected_object != "Ring" or not latest_result:
+        return
+
+    height, width = display.shape[:2]
+    panel_width = min(340, max(260, width - 30))
+    line_height = 21
+    lines = [
+        ("Ring result", ""),
+        ("Outer major", format_metric(
+            latest_result.get("outer_major_axis_mm"), " mm")),
+        ("Outer minor", format_metric(
+            latest_result.get("outer_minor_axis_mm"), " mm")),
+        ("Inner major", format_metric(
+            latest_result.get("inner_major_axis_mm"), " mm")),
+        ("Inner minor", format_metric(
+            latest_result.get("inner_minor_axis_mm"), " mm")),
+        ("Outer equiv dia", format_metric(
+            latest_result.get("outer_diameter_mm"), " mm")),
+        ("Inner equiv dia", format_metric(
+            latest_result.get("inner_diameter_mm"), " mm")),
+        ("Ring area", format_metric(
+            latest_result.get("surface_area_mm2"), " mm2")),
+        ("Depth", format_metric(
+            latest_result.get("estimated_depth_mm"), " mm")),
+        ("Confidence", format_metric(
+            latest_result.get("confidence_score"), "", precision=3)),
+    ]
+    panel_height = 18 + line_height * len(lines)
+    left = max(10, width - panel_width - 10)
+    top = 74
+    if top + panel_height > height - 10:
+        top = max(10, height - panel_height - 10)
+    right = min(width - 10, left + panel_width)
+    bottom = min(height - 10, top + panel_height)
+
+    overlay = display.copy()
+    cv2.rectangle(overlay, (left, top), (right, bottom), (20, 25, 30), -1)
+    cv2.addWeighted(overlay, 0.68, display, 0.32, 0, display)
+    cv2.rectangle(display, (left, top), (right, bottom), (255, 255, 255), 1)
+
+    y = top + 24
+    for index, (label, value) in enumerate(lines):
+        if index == 0:
+            cv2.putText(display, label, (left + 12, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.58, (255, 255, 255), 2,
+                        cv2.LINE_AA)
+        else:
+            cv2.putText(display, label, (left + 12, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 220, 230), 1,
+                        cv2.LINE_AA)
+            cv2.putText(display, value, (left + 165, y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.48, (0, 255, 255), 1,
+                        cv2.LINE_AA)
+        y += line_height
+
+
 def draw_menu_button(display):
     global menu_button_rect
     height, width = display.shape[:2]
@@ -1103,6 +1169,7 @@ def run_camera():
                     if locked_detection is not None:
                         draw_detection(display, locked_detection)
                 draw_measurement(display)
+                draw_ring_metrics_panel(display)
                 if locked_detection is not None:
                     instruction = "Mode: {} | Detection locked".format(selected_object)
                 elif selected_object == "Ring":
