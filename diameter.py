@@ -852,6 +852,12 @@ def draw_debug_status(display):
                 cv2.LINE_AA)
 
 
+def should_show_isolated_detection():
+    if selected_object == "Ring":
+        return not background_removal_enabled
+    return background_removal_enabled
+
+
 def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale):
     """Estimate depth, projected area, and circle diameter from a locked mask."""
     left, top, right, bottom = current_aoi
@@ -1088,12 +1094,14 @@ def run_camera():
                 instruction = "CALIBRATE: click background points {}/{}".format(
                     len(calibration_points), CALIBRATION_POINT_COUNT)
             else:
-                if background_removal_enabled and locked_detection is not None:
+                if should_show_isolated_detection() and locked_detection is not None:
                     display = cv2.bitwise_and(
                         cropped, cropped, mask=locked_detection["mask"])
                     draw_detection(display, locked_detection)
                 else:
                     display = cropped
+                    if locked_detection is not None:
+                        draw_detection(display, locked_detection)
                 draw_measurement(display)
                 if locked_detection is not None:
                     instruction = "Mode: {} | Detection locked".format(selected_object)
@@ -1164,8 +1172,13 @@ def run_camera():
                         print("Estimated result:", latest_result)
             if key in (ord("b"), ord("B")):
                 background_removal_enabled = not background_removal_enabled
-                print("Background removal {}.".format(
-                    "enabled" if background_removal_enabled else "disabled"))
+                if selected_object == "Ring":
+                    print("Ring view: {}.".format(
+                        "raw camera with overlays" if background_removal_enabled
+                        else "isolated mask debug"))
+                else:
+                    print("Background removal {}.".format(
+                        "enabled" if background_removal_enabled else "disabled"))
             if key in (ord("c"), ord("C")):
                 calibration_mode = not calibration_mode
                 calibration_points.clear()
