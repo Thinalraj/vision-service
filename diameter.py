@@ -1,4 +1,6 @@
+import csv
 import json
+from datetime import datetime
 from pathlib import Path
 
 import cv2
@@ -27,6 +29,7 @@ calibration_samples = []
 current_aoi = (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
 active_color_calibration = None
 background_removal_enabled = True
+latest_result = {}
 
 
 def load_config():
@@ -217,7 +220,7 @@ def select_object():
 
 
 def mouse_callback(event, x, y, flags, param):
-    global clicked_points
+    global clicked_points, latest_result
     if event != cv2.EVENT_LBUTTONDOWN or depth_frame_global is None:
         return
 
@@ -253,6 +256,7 @@ def mouse_callback(event, x, y, flags, param):
         p1 = np.array(clicked_points[0]["point"])
         p2 = np.array(clicked_points[1]["point"])
         distance_mm = np.linalg.norm(p2 - p1) * 1000
+        latest_result["diameter_mm"] = float(distance_mm)
         print("\n===================================")
         print("Measured {} size:".format(selected_object.lower()))
         print("{:.3f} mm".format(distance_mm))
@@ -399,14 +403,94 @@ def draw_detection(display, detection):
         cv2.drawContours(display, [detection["rectangle"]], -1, (0, 255, 0), 2)
 
 
+def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale):
+    """Estimate depth, projected area, and circle diameter from a locked mask."""
+    left, top, right, bottom = current_aoi
+    depth_raw = np.asanyarray(depth_frame.get_data())
+    depth_crop = depth_raw[top:bottom + 1, left:right + 1]
+    valid_depth = depth_crop[(detection["mask"] > 0) & (depth_crop > 0)]
+    if valid_depth.size == 0:
+        return {}
+
+    depth_m = float(np.median(valid_depth)) * depth_scale
+    pixel_area = float(cv2.countNonZero(detection["mask"]))
+    surface_area_mm2 = (
+        pixel_area * depth_m * depth_m / (intrinsics.fx * intrinsics.fy) * 1_000_000.0
+    )
+    metrics = {
+        "estimated_depth_mm": depth_m * 1000.0,
+        "surface_area_mm2": surface_area_mm2,
+    }
+    if selected_object in ("Coin", "Ring"):
+        scale_mm_per_pixel = (
+            depth_m / intrinsics.fx + depth_m / intrinsics.fy
+        ) * 0.5 * 1000.0
+        metrics["diameter_mm"] = 2.0 * detection["radius"] * scale_mm_per_pixel
+    return metrics
+
+
+def save_result_dialog():
+    """Ask for an item name and append the current result to a chosen CSV file."""
+    if not latest_result:
+        print("No result to save. Detect an object or measure two points first.")
+        return
+
+    import tkinter as tk
+    from tkinter import filedialog, simpledialog
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    item_name = simpledialog.askstring(
+        "Save measurement", "Item name:", parent=root)
+    if not item_name:
+        root.destroy()
+        print("Save cancelled.")
+        return
+
+    csv_path = filedialog.asksaveasfilename(
+        parent=root,
+        title="Save measurement results",
+        initialfile="measurement_results.csv",
+        defaultextension=".csv",
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+    )
+    root.destroy()
+    if not csv_path:
+        print("Save cancelled.")
+        return
+
+    row = {
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "item_name": item_name,
+        "object_type": selected_object,
+        "diameter_mm": latest_result.get("diameter_mm", ""),
+        "surface_area_mm2": latest_result.get("surface_area_mm2", ""),
+        "estimated_depth_mm": latest_result.get("estimated_depth_mm", ""),
+        "aoi_x1": current_aoi[0],
+        "aoi_y1": current_aoi[1],
+        "aoi_x2": current_aoi[2],
+        "aoi_y2": current_aoi[3],
+    }
+    fieldnames = list(row.keys())
+    file_exists = Path(csv_path).exists() and Path(csv_path).stat().st_size > 0
+    with open(csv_path, "a", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+    print("Saved result for '{}' to {}".format(item_name, csv_path))
+
+
 def run_camera():
     global depth_frame_global, intrinsics_global, current_color_image
     global calibration_mode, current_aoi, active_color_calibration
-    global background_removal_enabled
+    global background_removal_enabled, latest_result
     current_aoi = load_aoi()
     active_color_calibration = load_config().get(
         "color_calibrations", {}).get(selected_object)
     background_removal_enabled = True
+    latest_result = {}
     locked_detection = None
     pipeline = rs.pipeline()
     config = rs.config()
@@ -417,6 +501,7 @@ def run_camera():
                          rs.format.bgr8, FRAME_RATE)
     profile = pipeline.start(config)
     enable_automatic_camera_controls(profile.get_device())
+    depth_scale = profile.get_device().first_depth_sensor().get_depth_scale()
     align = rs.align(rs.stream.color)
 
     print("Starting camera for {} measurement...".format(selected_object.lower()))
@@ -424,7 +509,7 @@ def run_camera():
         pipeline.wait_for_frames()
     print("Camera ready.")
     print("A = Set AOI, X = Reset all AOIs, C = Colour calibration.")
-    print("D = Detect once, B = Toggle detected background removal.")
+    print("D = Detect once, B = Toggle detected background removal, S = Save result.")
     print("Click two points. R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
@@ -470,7 +555,7 @@ def run_camera():
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                         (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
-                        "A=AOI X=Default C=Calibrate D=Detect B=View R=Reset",
+                        "A=AOI X=Default C=Cal D=Detect B=View R=Reset S=Save",
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
@@ -482,6 +567,7 @@ def run_camera():
             if key in (ord("r"), ord("R")):
                 clicked_points.clear()
                 locked_detection = None
+                latest_result = {}
                 print("Measurement and detection reset.")
             if key in (ord("a"), ord("A")):
                 calibration_mode = False
@@ -489,6 +575,7 @@ def run_camera():
                 calibration_points.clear()
                 calibration_samples.clear()
                 locked_detection = None
+                latest_result = {}
                 choose_aoi()
                 cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
             if key in (ord("x"), ord("X")):
@@ -496,6 +583,7 @@ def run_camera():
                 current_aoi = (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
                 clicked_points.clear()
                 locked_detection = None
+                latest_result = {}
             if key in (ord("d"), ord("D")):
                 if not active_color_calibration:
                     print("No colour calibration. Press C and sample 9 background points first.")
@@ -504,10 +592,16 @@ def run_camera():
                     if new_detection is None:
                         print("No valid {} object detected.".format(selected_object.lower()))
                     else:
+                        manual_diameter = latest_result.get("diameter_mm")
                         locked_detection = new_detection
+                        latest_result = calculate_detection_metrics(
+                            new_detection, depth_frame, intrinsics_global, depth_scale)
+                        if manual_diameter is not None:
+                            latest_result["diameter_mm"] = manual_diameter
                         background_removal_enabled = True
                         print("{} detection locked. Press R to clear it.".format(
                             selected_object))
+                        print("Estimated result:", latest_result)
             if key in (ord("b"), ord("B")):
                 background_removal_enabled = not background_removal_enabled
                 print("Background removal {}.".format(
@@ -517,6 +611,7 @@ def run_camera():
                 calibration_points.clear()
                 calibration_samples.clear()
                 locked_detection = None
+                latest_result = {}
                 if calibration_mode:
                     clicked_points.clear()
                     print("Colour calibration started.")
@@ -525,6 +620,8 @@ def run_camera():
                     print("Colour calibration cancelled.")
             if key in (ord("m"), ord("M")):
                 return True
+            if key in (ord("s"), ord("S")):
+                save_result_dialog()
     finally:
         depth_frame_global = None
         intrinsics_global = None
