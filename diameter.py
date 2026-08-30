@@ -1198,20 +1198,21 @@ def run_camera():
             # unblended BGR frame to match RealSense Viewer color rendering.
             current_color_image = np.asanyarray(color_frame.get_data()).copy()
             left, top, right, bottom = current_aoi
-            cropped = current_color_image[top:bottom + 1,
-                                          left:right + 1].copy()
+            # Keep processing input separate from the annotated display image.
+            raw_cropped = current_color_image[top:bottom + 1,
+                                              left:right + 1].copy()
             if calibration_mode:
-                display = cropped
+                display = raw_cropped.copy()
                 draw_calibration(display)
                 instruction = "CALIBRATE: click background points {}/{}".format(
                     len(calibration_points), CALIBRATION_POINT_COUNT)
             else:
                 if should_show_isolated_detection() and locked_detection is not None:
                     display = cv2.bitwise_and(
-                        cropped, cropped, mask=locked_detection["mask"])
+                        raw_cropped, raw_cropped, mask=locked_detection["mask"])
                     draw_detection(display, locked_detection)
                 else:
-                    display = cropped
+                    display = raw_cropped.copy()
                     if locked_detection is not None:
                         draw_detection(display, locked_detection)
                 draw_measurement(display)
@@ -1269,7 +1270,7 @@ def run_camera():
                 if selected_object != "Ring" and not active_color_calibration:
                     print("No colour calibration. Press C and sample 9 background points first.")
                 else:
-                    _, new_detection = segment_object(cropped)
+                    _, new_detection = segment_object(raw_cropped)
                     if new_detection is None:
                         print("No valid {} object detected.".format(selected_object.lower()))
                     else:
