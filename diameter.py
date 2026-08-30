@@ -181,6 +181,11 @@ def mouse_callback(event, x, y, flags, param):
     if event != cv2.EVENT_LBUTTONDOWN or depth_frame_global is None:
         return
 
+    # The live window is cropped, so translate clicks back to the aligned
+    # camera frame before sampling depth or colour.
+    x += current_aoi[0]
+    y += current_aoi[1]
+
     if not point_in_aoi(x, y):
         print("Point is outside the AOI.")
         return
@@ -215,8 +220,10 @@ def mouse_callback(event, x, y, flags, param):
 
 
 def draw_measurement(display):
+    offset_x, offset_y = current_aoi[0], current_aoi[1]
     for index, item in enumerate(clicked_points):
-        x, y = item["pixel"]
+        x = item["pixel"][0] - offset_x
+        y = item["pixel"][1] - offset_y
         cv2.circle(display, (x, y), 6, (255, 255, 255), -1)
         cv2.putText(display, "P{}".format(index + 1), (x + 10, y - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2,
@@ -225,8 +232,10 @@ def draw_measurement(display):
     if len(clicked_points) != 2:
         return
 
-    p1_pixel = clicked_points[0]["pixel"]
-    p2_pixel = clicked_points[1]["pixel"]
+    p1_pixel = (clicked_points[0]["pixel"][0] - offset_x,
+                clicked_points[0]["pixel"][1] - offset_y)
+    p2_pixel = (clicked_points[1]["pixel"][0] - offset_x,
+                clicked_points[1]["pixel"][1] - offset_y)
     cv2.line(display, p1_pixel, p2_pixel, (255, 255, 255), 2)
     p1 = np.array(clicked_points[0]["point"])
     p2 = np.array(clicked_points[1]["point"])
@@ -239,16 +248,14 @@ def draw_measurement(display):
 
 
 def draw_calibration(display):
+    offset_x, offset_y = current_aoi[0], current_aoi[1]
     for index, (x, y) in enumerate(calibration_points):
+        x -= offset_x
+        y -= offset_y
         cv2.circle(display, (x, y), SAMPLE_RADIUS + 3, (0, 255, 255), 2)
         cv2.putText(display, str(index + 1), (x + 10, y - 8),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1,
                     cv2.LINE_AA)
-
-
-def draw_aoi(display):
-    left, top, right, bottom = current_aoi
-    cv2.rectangle(display, (left, top), (right, bottom), (0, 255, 0), 2)
 
 
 def run_camera():
@@ -286,8 +293,9 @@ def run_camera():
             # The old JET depth blend changed every visible color. Display the
             # unblended BGR frame to match RealSense Viewer color rendering.
             current_color_image = np.asanyarray(color_frame.get_data()).copy()
-            display = current_color_image.copy()
-            draw_aoi(display)
+            left, top, right, bottom = current_aoi
+            display = current_color_image[top:bottom + 1,
+                                          left:right + 1].copy()
             if calibration_mode:
                 draw_calibration(display)
                 instruction = "CALIBRATE: click background points {}/{}".format(
@@ -314,6 +322,7 @@ def run_camera():
                 print("Measurement reset.")
             if key in (ord("a"), ord("A")):
                 calibration_mode = False
+                clicked_points.clear()
                 calibration_points.clear()
                 calibration_samples.clear()
                 choose_aoi()

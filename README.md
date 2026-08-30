@@ -24,6 +24,6 @@ Choose an object from the opening menu to start the camera, then click two measu
 
 Press `C` to start colour calibration. Click nine clean background locations spread across the image. Each click samples an 11 x 11 pixel patch; after the ninth point, a robust CIE Lab background profile is saved to `vision_config.json` for the selected object. Press `C` again before completing nine points to cancel.
 
-Press `A` to draw and save an area of interest (AOI) for the selected object. Drag the rectangle and press `Enter` or `Space` to accept it. Measurement and calibration clicks outside the AOI are ignored. Press `D` to reset all four object AOIs to the default full camera frame.
+Press `A` to draw and save an area of interest (AOI) for the selected object. Drag the rectangle and press `Enter` or `Space` to accept it. The main live window then displays only that cropped region while preserving full-frame coordinates for depth and colour sampling. Press `D` to reset all four object AOIs to the default full camera frame.
 
 The application displays the unblended BGR camera stream so its colors match the RealSense Viewer more closely.
