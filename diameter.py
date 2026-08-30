@@ -18,6 +18,7 @@ SAMPLE_RADIUS = 5
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
 FRAME_RATE = 30
+MAX_SKELETON_ITERATIONS = 300
 IMAGE_DISPLAY_WIDTH = 960
 IMAGE_DISPLAY_HEIGHT = 720
 CONTROL_PANEL_WIDTH = 360
@@ -671,6 +672,22 @@ def result_lines_for_panel():
             ("Depth", format_metric(
                 latest_result.get("estimated_depth_mm"), " mm")),
         ]
+    if selected_object == "Chain":
+        return [
+            ("Result", "Chain"),
+            ("Path length", format_metric(
+                latest_result.get("chain_path_length_mm"), " mm")),
+            ("Box length", format_metric(latest_result.get("length_mm"), " mm")),
+            ("Box width", format_metric(latest_result.get("width_mm"), " mm")),
+            ("Footprint W", format_metric(
+                latest_result.get("footprint_width_mm"), " mm")),
+            ("Footprint H", format_metric(
+                latest_result.get("footprint_height_mm"), " mm")),
+            ("Surface area", format_metric(
+                latest_result.get("chain_surface_area_mm2"), " mm2")),
+            ("Depth", format_metric(
+                latest_result.get("estimated_depth_mm"), " mm")),
+        ]
     return [
         ("Result", selected_object),
         ("Diameter", format_metric(latest_result.get("diameter_mm"), " mm")),
@@ -768,6 +785,52 @@ def should_show_isolated_detection():
     return background_removal_enabled
 
 
+def estimate_skeleton_length_pixels(mask):
+    binary = (mask > 0).astype(np.uint8) * 255
+    skeleton = np.zeros_like(binary)
+    kernel = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+
+    iterations = 0
+    while cv2.countNonZero(binary) > 0 and iterations < MAX_SKELETON_ITERATIONS:
+        opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        edge = cv2.subtract(binary, opened)
+        skeleton = cv2.bitwise_or(skeleton, edge)
+        binary = cv2.erode(binary, kernel)
+        iterations += 1
+
+    if cv2.countNonZero(skeleton) == 0:
+        return 0.0
+
+    horizontal = cv2.countNonZero(skeleton[:, 1:] & skeleton[:, :-1])
+    vertical = cv2.countNonZero(skeleton[1:, :] & skeleton[:-1, :])
+    diag_a = cv2.countNonZero(skeleton[1:, 1:] & skeleton[:-1, :-1])
+    diag_b = cv2.countNonZero(skeleton[1:, :-1] & skeleton[:-1, 1:])
+    return float(horizontal + vertical + np.sqrt(2.0) * (diag_a + diag_b))
+
+
+def add_chain_metrics(metrics, detection, depth_m, intrinsics):
+    mask = detection["mask"]
+    points = cv2.findNonZero(mask)
+    if points is None:
+        return
+
+    x, y, width_px, height_px = cv2.boundingRect(points)
+    metrics["footprint_width_mm"] = width_px * depth_m / intrinsics.fx * 1000.0
+    metrics["footprint_height_mm"] = height_px * depth_m / intrinsics.fy * 1000.0
+
+    rectangle = cv2.minAreaRect(points)
+    box_width_px, box_height_px = rectangle[1]
+    scale_mm_per_pixel = (
+        depth_m / intrinsics.fx + depth_m / intrinsics.fy
+    ) * 0.5 * 1000.0
+    short_px, long_px = sorted((box_width_px, box_height_px))
+    metrics["width_mm"] = short_px * scale_mm_per_pixel
+    metrics["length_mm"] = long_px * scale_mm_per_pixel
+    metrics["chain_path_length_mm"] = (
+        estimate_skeleton_length_pixels(mask) * scale_mm_per_pixel)
+    metrics["chain_surface_area_mm2"] = metrics["surface_area_mm2"]
+
+
 def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale):
     """Estimate depth, projected area, and circle diameter from a locked mask."""
     left, top, right, bottom = current_aoi
@@ -858,6 +921,8 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
             background_depth_m = float(np.median(background_depth)) * depth_scale
             metrics["estimated_thickness_mm"] = max(
                 0.0, (background_depth_m - depth_m) * 1000.0)
+    if selected_object == "Chain":
+        add_chain_metrics(metrics, detection, depth_m, intrinsics)
     return metrics
 
 
@@ -937,6 +1002,11 @@ def save_result_dialog():
         "confidence_score": latest_result.get("confidence_score", ""),
         "width_mm": latest_result.get("width_mm", ""),
         "length_mm": latest_result.get("length_mm", ""),
+        "chain_path_length_mm": latest_result.get("chain_path_length_mm", ""),
+        "footprint_width_mm": latest_result.get("footprint_width_mm", ""),
+        "footprint_height_mm": latest_result.get("footprint_height_mm", ""),
+        "chain_surface_area_mm2": latest_result.get(
+            "chain_surface_area_mm2", ""),
         "surface_area_mm2": latest_result.get("surface_area_mm2", ""),
         "estimated_depth_mm": latest_result.get("estimated_depth_mm", ""),
         "estimated_thickness_mm": latest_result.get("estimated_thickness_mm", ""),
