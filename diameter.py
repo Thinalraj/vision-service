@@ -10,7 +10,8 @@ import pyrealsense2 as rs
 
 WINDOW_NAME = "D405 Vision Measurement"
 MENU_NAME = "Select Measurement Type"
-OBJECT_OPTIONS = ["Coin", "Bangle", "Ring", "Bar", "Chain"]
+OBJECT_OPTIONS = ["Coin", "Bangle", "Ring", "Bar", "Chain",
+                  "Ornaments / Pendants / Others"]
 SETTINGS_FILE = Path(__file__).with_name("settings.json")
 LEGACY_CONFIG_FILE = Path(__file__).with_name("vision_config.json")
 CALIBRATION_POINT_COUNT = 9
@@ -219,14 +220,15 @@ def add_calibration_point(x, y):
 
 def draw_menu():
     """Show the object selector without starting the camera."""
-    menu = np.full((520, 720, 3), (32, 35, 42), dtype=np.uint8)
+    menu = np.full((650, 720, 3), (32, 35, 42), dtype=np.uint8)
     cv2.putText(menu, "Select an object", (210, 70), cv2.FONT_HERSHEY_SIMPLEX,
                 1.1, (255, 255, 255), 2, cv2.LINE_AA)
     cv2.putText(menu, "The camera starts after your selection", (170, 105),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (185, 190, 200), 1, cv2.LINE_AA)
 
     button_width, button_height = 220, 85
-    positions = [(75, 145), (345, 145), (75, 265), (345, 265), (210, 385)]
+    positions = [(75, 145), (345, 145), (75, 265), (345, 265),
+                 (75, 385), (345, 385)]
     buttons = []
     for label, (x, y) in zip(OBJECT_OPTIONS, positions):
         cv2.rectangle(menu, (x, y), (x + button_width, y + button_height),
@@ -364,6 +366,10 @@ def draw_calibration(display):
 
 def is_ring_like_object():
     return selected_object in ("Bangle", "Ring")
+
+
+def is_generic_object():
+    return selected_object == "Ornaments / Pendants / Others"
 
 
 def find_annulus_hole(object_mask, contour, outer_ellipse, area, center_x,
@@ -672,6 +678,14 @@ def result_lines_for_panel():
             ("Depth", format_metric(
                 latest_result.get("estimated_depth_mm"), " mm")),
         ]
+    if is_generic_object():
+        return [
+            ("Result", "Object detected"),
+            ("Area", format_metric(latest_result.get("surface_area_mm2"), " mm2")),
+            ("Width", format_metric(latest_result.get("width_mm"), " mm")),
+            ("Length", format_metric(latest_result.get("length_mm"), " mm")),
+            ("Depth", format_metric(latest_result.get("estimated_depth_mm"), " mm")),
+        ]
     if selected_object == "Chain":
         return [
             ("Result", "Chain"),
@@ -921,6 +935,12 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
             background_depth_m = float(np.median(background_depth)) * depth_scale
             metrics["estimated_thickness_mm"] = max(
                 0.0, (background_depth_m - depth_m) * 1000.0)
+    if is_generic_object():
+        points = cv2.findNonZero(detection["mask"])
+        if points is not None:
+            _, _, width_px, height_px = cv2.boundingRect(points)
+            metrics["width_mm"] = width_px * depth_m / intrinsics.fx * 1000.0
+            metrics["length_mm"] = height_px * depth_m / intrinsics.fy * 1000.0
     if selected_object == "Chain":
         add_chain_metrics(metrics, detection, depth_m, intrinsics)
     return metrics
