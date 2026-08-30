@@ -453,14 +453,42 @@ def calculate_detection_metrics(detection, depth_frame, intrinsics, depth_scale)
     return metrics
 
 
+def choose_results_file(parent):
+    from tkinter import filedialog
+
+    csv_path = filedialog.asksaveasfilename(
+        parent=parent,
+        title="Select measurement results file",
+        initialfile="measurement_results.csv",
+        defaultextension=".csv",
+        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+    )
+    if csv_path:
+        config_data = load_config()
+        config_data["results_file"] = csv_path
+        write_config(config_data)
+        print("Results file set to {}".format(csv_path))
+    return csv_path
+
+
+def choose_results_file_dialog():
+    import tkinter as tk
+
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    choose_results_file(root)
+    root.destroy()
+
+
 def save_result_dialog():
-    """Ask for an item name and append the current result to a chosen CSV file."""
+    """Ask for an item name and append the result to the configured CSV."""
     if not latest_result:
         print("No result to save. Detect an object or measure two points first.")
         return
 
     import tkinter as tk
-    from tkinter import filedialog, simpledialog
+    from tkinter import simpledialog
 
     root = tk.Tk()
     root.withdraw()
@@ -472,13 +500,9 @@ def save_result_dialog():
         print("Save cancelled.")
         return
 
-    csv_path = filedialog.asksaveasfilename(
-        parent=root,
-        title="Save measurement results",
-        initialfile="measurement_results.csv",
-        defaultextension=".csv",
-        filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-    )
+    csv_path = load_config().get("results_file")
+    if not csv_path:
+        csv_path = choose_results_file(root)
     root.destroy()
     if not csv_path:
         print("Save cancelled.")
@@ -500,15 +524,24 @@ def save_result_dialog():
         "aoi_y2": current_aoi[3],
     }
     fieldnames = list(row.keys())
-    existing_rows = []
-    if Path(csv_path).exists() and Path(csv_path).stat().st_size > 0:
+    csv_file_path = Path(csv_path)
+    has_existing_data = csv_file_path.exists() and csv_file_path.stat().st_size > 0
+    if has_existing_data:
         with open(csv_path, "r", newline="", encoding="utf-8") as csv_file:
-            existing_rows = list(csv.DictReader(csv_file))
-    with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
-        writer = csv.DictWriter(
-            csv_file, fieldnames=fieldnames, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(existing_rows)
+            reader = csv.DictReader(csv_file)
+            existing_rows = list(reader)
+            existing_fields = reader.fieldnames
+        # Upgrade an older schema once. Normal saves use append mode.
+        if existing_fields != fieldnames:
+            with open(csv_path, "w", newline="", encoding="utf-8") as csv_file:
+                writer = csv.DictWriter(
+                    csv_file, fieldnames=fieldnames, extrasaction="ignore")
+                writer.writeheader()
+                writer.writerows(existing_rows)
+    with open(csv_path, "a", newline="", encoding="utf-8") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=fieldnames)
+        if not has_existing_data:
+            writer.writeheader()
         writer.writerow(row)
     print("Saved result for '{}' to {}".format(item_name, csv_path))
 
@@ -540,7 +573,7 @@ def run_camera():
         pipeline.wait_for_frames()
     print("Camera ready.")
     print("A = Set AOI, X = Reset all AOIs, C = Colour calibration.")
-    print("D = Detect once, B = Toggle detected background removal, S = Save result.")
+    print("D = Detect once, B = Toggle view, S = Save, O = Choose results file.")
     print("Click two points. R = Reset, M = Menu, ESC = Exit.")
 
     cv2.namedWindow(WINDOW_NAME)
@@ -586,7 +619,7 @@ def run_camera():
                         (20, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65,
                         (255, 255, 255), 2, cv2.LINE_AA)
             cv2.putText(display,
-                        "A=AOI X=Default C=Cal D=Detect B=View R=Reset S=Save",
+                        "A=AOI X=Default C=Cal D=Detect R=Reset S=Save O=Output",
                         (20, 60),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2,
                         cv2.LINE_AA)
@@ -653,6 +686,8 @@ def run_camera():
                 return True
             if key in (ord("s"), ord("S")):
                 save_result_dialog()
+            if key in (ord("o"), ord("O")):
+                choose_results_file_dialog()
     finally:
         depth_frame_global = None
         intrinsics_global = None
