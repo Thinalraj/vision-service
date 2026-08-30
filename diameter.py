@@ -12,6 +12,9 @@ OBJECT_OPTIONS = ["Coin", "Ring", "Bar", "Chain"]
 CALIBRATION_FILE = Path(__file__).with_name("vision_config.json")
 CALIBRATION_POINT_COUNT = 9
 SAMPLE_RADIUS = 5
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+FRAME_RATE = 30
 
 clicked_points = []
 depth_frame_global = None
@@ -21,7 +24,7 @@ current_color_image = None
 calibration_mode = False
 calibration_points = []
 calibration_samples = []
-current_aoi = (0, 0, 639, 479)
+current_aoi = (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
 active_color_calibration = None
 background_removal_enabled = True
 
@@ -45,14 +48,34 @@ def write_config(config_data):
 
 def load_aoi():
     saved = load_config().get("areas", {}).get(selected_object)
+    saved_resolution = [640, 480]
+    if isinstance(saved, dict):
+        saved_resolution = saved.get("resolution", [FRAME_WIDTH, FRAME_HEIGHT])
+        saved = saved.get("coordinates")
     if isinstance(saved, list) and len(saved) == 4:
-        return tuple(int(value) for value in saved)
-    return (0, 0, 639, 479)
+        scale_x = FRAME_WIDTH / float(saved_resolution[0])
+        scale_y = FRAME_HEIGHT / float(saved_resolution[1])
+        scaled = (
+            int(round(saved[0] * scale_x)),
+            int(round(saved[1] * scale_y)),
+            int(round(saved[2] * scale_x)),
+            int(round(saved[3] * scale_y)),
+        )
+        return (
+            max(0, min(FRAME_WIDTH - 1, scaled[0])),
+            max(0, min(FRAME_HEIGHT - 1, scaled[1])),
+            max(0, min(FRAME_WIDTH - 1, scaled[2])),
+            max(0, min(FRAME_HEIGHT - 1, scaled[3])),
+        )
+    return (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
 
 
 def save_aoi(aoi):
     config_data = load_config()
-    config_data.setdefault("areas", {})[selected_object] = list(aoi)
+    config_data.setdefault("areas", {})[selected_object] = {
+        "coordinates": list(aoi),
+        "resolution": [FRAME_WIDTH, FRAME_HEIGHT],
+    }
     write_config(config_data)
     print("Saved {} AOI: {}".format(selected_object, aoi))
 
@@ -61,7 +84,20 @@ def reset_all_aois():
     config_data = load_config()
     config_data["areas"] = {}
     write_config(config_data)
-    print("All AOIs reset to the full 640 x 480 frame.")
+    print("All AOIs reset to the full {} x {} frame.".format(
+        FRAME_WIDTH, FRAME_HEIGHT))
+
+
+def enable_automatic_camera_controls(device):
+    """Enable supported automatic exposure and white-balance controls."""
+    for sensor in device.query_sensors():
+        sensor_name = sensor.get_info(rs.camera_info.name)
+        if sensor.supports(rs.option.enable_auto_exposure):
+            sensor.set_option(rs.option.enable_auto_exposure, 1.0)
+            print("Auto exposure enabled on {}.".format(sensor_name))
+        if sensor.supports(rs.option.enable_auto_white_balance):
+            sensor.set_option(rs.option.enable_auto_white_balance, 1.0)
+            print("Auto white balance enabled on {}.".format(sensor_name))
 
 
 def point_in_aoi(x, y):
@@ -374,10 +410,13 @@ def run_camera():
     locked_detection = None
     pipeline = rs.pipeline()
     config = rs.config()
-    config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+    config.enable_stream(rs.stream.depth, FRAME_WIDTH, FRAME_HEIGHT,
+                         rs.format.z16, FRAME_RATE)
     # OpenCV expects BGR, so request that channel order directly from RealSense.
-    config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-    pipeline.start(config)
+    config.enable_stream(rs.stream.color, FRAME_WIDTH, FRAME_HEIGHT,
+                         rs.format.bgr8, FRAME_RATE)
+    profile = pipeline.start(config)
+    enable_automatic_camera_controls(profile.get_device())
     align = rs.align(rs.stream.color)
 
     print("Starting camera for {} measurement...".format(selected_object.lower()))
@@ -454,7 +493,7 @@ def run_camera():
                 cv2.setMouseCallback(WINDOW_NAME, mouse_callback)
             if key in (ord("x"), ord("X")):
                 reset_all_aois()
-                current_aoi = (0, 0, 639, 479)
+                current_aoi = (0, 0, FRAME_WIDTH - 1, FRAME_HEIGHT - 1)
                 clicked_points.clear()
                 locked_detection = None
             if key in (ord("d"), ord("D")):

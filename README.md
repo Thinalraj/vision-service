@@ -29,3 +29,5 @@ Press `A` to draw and save an area of interest (AOI) for the selected object. Dr
 After colour calibration, press `D` to run detection once and lock the resulting mask and outline. Detection is not recalculated on every frame. Press `R` to clear the locked detection and measurements. The mask is cleaned with morphological filtering and the main contour is isolated. Coin and Ring modes require a reasonably circular contour and display a fitted enclosing circle. Bar mode requires a rectangular contour and displays a rotated fitted rectangle, supporting bars, plates, and square samples at different angles. Press `B` to toggle between the isolated-object and raw camera views without rerunning detection.
 
 The application displays the unblended BGR camera stream so its colors match the RealSense Viewer more closely.
+
+Both aligned depth and colour streams run at 1280 x 720 and 30 FPS. Supported RealSense sensors have auto exposure enabled, and the colour sensor has auto white balance enabled. Re-run colour calibration after changing camera resolution or lighting.
