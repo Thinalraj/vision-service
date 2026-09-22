@@ -20,6 +20,20 @@ Run:
 python diameter.py
 ```
 
+## FastAPI service
+
+Run the REST API in a separate process:
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000
+```
+
+The service uses the D405 camera and the per-mode colour calibration saved by
+the desktop app. `GET /image` returns the latest camera frame as JPEG. `GET
+/size?type=coin` captures a frame and returns JSON containing the measured
+diameter, projected surface area, and depth. Supported types are `coin`,
+`bar`, `chain`, `ring`, `bangle`, and `ornament`.
+
 Choose an object from the opening menu to start the camera. The main window uses a fixed camera display area on the left and a control panel on the right. Use the buttons for Detect, Reset, AOI, Default AOI, Calibrate, Toggle View, Save Result, Output File, Menu, and Exit. Keyboard shortcuts still work: press `R` to reset, `M` to return to the menu, and `Esc` to exit.
 
 The camera image is kept free of menus and result panels. Measurement values and detector status appear in the right-side panel instead of being drawn over the object.

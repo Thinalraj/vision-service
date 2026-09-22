@@ -1,3 +1,5 @@
 numpy
+fastapi
+uvicorn[standard]
 opencv-python
 pyrealsense2
