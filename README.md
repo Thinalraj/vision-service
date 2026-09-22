@@ -28,6 +28,15 @@ Run the REST API in a separate process:
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
+Optional Flask browser test client (port 5000):
+
+```bash
+python test_flask_app.py
+```
+
+Open `http://localhost:5000`. It proxies `/image` and `/size` to the FastAPI
+service on port 8000. Set `VISION_API_URL` if FastAPI runs on another host.
+
 The service uses the D405 camera and the per-mode colour calibration saved by
 the desktop app. `GET /image` returns the latest camera frame as JPEG. `GET
 /size?type=coin` captures a frame and returns JSON containing the measured

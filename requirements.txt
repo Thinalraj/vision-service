@@ -3,3 +3,5 @@ fastapi
 uvicorn[standard]
 opencv-python
 pyrealsense2
+flask
+requests
