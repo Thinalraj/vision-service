@@ -28,6 +28,14 @@ Run the REST API in a separate process:
 uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
+On Windows, double-click `run_fastapi_8002.bat` to start the backend on port
+8002. The Flask test client should then be started with:
+
+```bat
+set VISION_API_URL=http://127.0.0.1:8002
+python test_flask_app.py
+```
+
 Optional Flask browser test client (port 5000):
 
 ```bash
