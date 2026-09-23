@@ -44,7 +44,7 @@ python test_flask_app.py
 ```
 
 Open `http://localhost:5000`. It proxies `/image` and `/size` to the FastAPI
-service on port 8000. Set `VISION_API_URL` if FastAPI runs on another host.
+service on port 8002. Set `VISION_API_URL` if FastAPI runs on another host.
 
 The service uses the D405 camera and the per-mode colour calibration saved by
 the desktop app. `GET /image` returns the latest camera frame as JPEG. `GET

@@ -8,7 +8,7 @@ import os
 import requests
 from flask import Flask, Response, jsonify, render_template_string, request
 
-FASTAPI_URL = os.getenv("VISION_API_URL", "http://127.0.0.1:8000")
+FASTAPI_URL = os.getenv("VISION_API_URL", "http://127.0.0.1:8002")
 app = Flask(__name__)
 
 PAGE = """
