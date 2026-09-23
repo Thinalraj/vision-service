@@ -16,7 +16,7 @@ PAGE = """
 <style>body{font:16px sans-serif;max-width:1000px;margin:30px auto}#stage{position:relative;display:inline-block}#preview{max-width:960px;border:1px solid #aaa}#aoi{position:absolute;border:2px solid #00aaff;display:none;pointer-events:none}img{max-width:100%;border:1px solid #aaa}button,select{padding:8px;margin:6px 4px 12px 0}pre{background:#f2f2f2;padding:12px}</style>
 <h1>Vision API test client</h1>
 <select id="type"><option>coin</option><option>bar</option><option>chain</option><option>ring</option><option>bangle</option><option>ornament</option></select>
-<button onclick="getImage()">Get image</button><button onclick="measure()">Get size</button><button onclick="detected()">Show detected object</button>
+<button onclick="getImage()">Get image</button><button onclick="measure()">Get size</button><button onclick="detected()">Show detected object</button><button onclick="loadSettings()">Load saved settings</button>
 <button onclick="sendAoi()">Send AOI</button><span> Drag on the image to draw AOI.</span>
 <div id="stage"><img id="preview" alt="Latest camera image"><div id="aoi"></div></div>
 <pre id="result">No measurement yet</pre>
@@ -26,6 +26,7 @@ const img=document.getElementById('preview'), box=document.getElementById('aoi')
 function getImage(){img.src='/proxy/image?t='+Date.now();}
 function detected(){img.src='/proxy/image/detected?t='+Date.now();}
 async function measure(){const t=document.getElementById('type').value;const r=await fetch('/proxy/size?type='+t);document.getElementById('result').textContent=await r.text();}
+async function loadSettings(){const t=document.getElementById('type').value;const r=await fetch('/proxy/settings?type='+t);document.getElementById('result').textContent=await r.text();}
 img.addEventListener('mousedown',e=>{const r=img.getBoundingClientRect();start={x:e.clientX-r.left,y:e.clientY-r.top};rect={...start,w:0,h:0};box.style.display='block';});
 img.addEventListener('mousemove',e=>{if(!start)return;const r=img.getBoundingClientRect();rect.w=e.clientX-r.left-start.x;rect.h=e.clientY-r.top-start.y;box.style.left=Math.min(start.x,start.x+rect.w)+'px';box.style.top=Math.min(start.y,start.y+rect.h)+'px';box.style.width=Math.abs(rect.w)+'px';box.style.height=Math.abs(rect.h)+'px';});
 window.addEventListener('mouseup',()=>{start=null;});
@@ -57,6 +58,16 @@ def proxy_detected_image():
 def proxy_size():
     object_type = request.args.get("type", "coin")
     result = requests.get(FASTAPI_URL + "/size", params={"type": object_type}, timeout=15)
+    try:
+        return jsonify(result.json()), result.status_code
+    except ValueError:
+        return result.text, result.status_code
+
+
+@app.get("/proxy/settings")
+def proxy_settings():
+    result = requests.get(FASTAPI_URL + "/settings",
+                          params={"type": request.args.get("type", "coin")}, timeout=15)
     try:
         return jsonify(result.json()), result.status_code
     except ValueError:

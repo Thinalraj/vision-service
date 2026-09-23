@@ -68,6 +68,26 @@ async def lifespan(app):
 app = FastAPI(title="Vision Service API", version="1.0", lifespan=lifespan)
 
 
+@app.get("/settings")
+def get_settings(type: str = Query("coin", min_length=1)):
+    """Return the AOI and calibration status saved by diameter.py."""
+    supported = {"coin": "Coin", "bar": "Bar", "chain": "Chain",
+                 "ring": "Ring", "bangle": "Bangle",
+                 "ornament": "Ornaments / Pendants / Others"}
+    mode = supported.get(type.strip().lower())
+    if mode is None:
+        raise HTTPException(400, "Unsupported type")
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text())
+    except (OSError, ValueError):
+        settings = {}
+    mode_settings = settings.get("modes", {}).get(mode, {})
+    calibration = mode_settings.get("color_calibration")
+    return {"type": mode, "aoi": mode_settings.get("aoi"),
+            "calibration_saved": bool(calibration),
+            "calibration": calibration}
+
+
 def object_mask(image, object_type):
     """Build an object mask from the selected mode's saved Lab background."""
     try:
